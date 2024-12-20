@@ -6,9 +6,9 @@ This is the code for the paper "RadioDiff: An Effective Generative Diffusion Mod
 
 #### 🔥🔥🔥 News
 
-- **2024-7:** This repo is released.
+- **2024-7:** This repo is constructed.
 - **2024-11:** Our paper has been accepted by IEEE TCCN.
-- **2024-12:** The code has been released!
+- **2024-12:** The code has been released! 🎉🎉🎉
 
 ---
 
