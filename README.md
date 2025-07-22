@@ -75,12 +75,14 @@ If you have some questions, please contact with KD.TAO@outlook.com.
 Thanks to the base code [DDM-Public](https://github.com/GuHuangAI/DDM-Public).
 ## Citation
 ~~~
-@ARTICLE{radiodiff,
+@ARTICLE{10764739,
   author={Wang, Xiucheng and Tao, Keda and Cheng, Nan and Yin, Zhisheng and Li, Zan and Zhang, Yuan and Shen, Xuemin},
   journal={IEEE Transactions on Cognitive Communications and Networking}, 
   title={RadioDiff: An Effective Generative Diffusion Model for Sampling-Free Dynamic Radio Map Construction}, 
-  year={2024},
-  pages={1-1},
-  keywords={Artificial neural networks;Training;Feature extraction;Diffusion models;Electromagnetics;Vehicle dynamics;Finite element analysis;Buildings;Noise;Costs;radio map;denoise diffusion model;generative problem;wireless network},
+  year={2025},
+  volume={11},
+  number={2},
+  pages={738-750},
+  keywords={Artificial neural networks;Training;Feature extraction;Diffusion models;Electromagnetics;Vehicle dynamics;Finite element analysis;Buildings;Noise;Costs;Radio map;denoise diffusion model;generative problem;wireless network},
   doi={10.1109/TCCN.2024.3504489}}
 ~~~
