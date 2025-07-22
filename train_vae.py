@@ -207,6 +207,9 @@ class Trainer(object):
                 total_loss = 0.
                 batch = next(self.dl)
                 img = batch['image'].to(device)
+                
+                
+                
                 for ga_ind in range(self.gradient_accumulate_every):
                     # data = next(self.dl).to(device)
                     # mask = mask.to(device)

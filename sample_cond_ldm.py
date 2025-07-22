@@ -1,5 +1,16 @@
+from copy import deepcopy
 import numpy as np
 import yaml
+import builtins
+
+# original_print = builtins.print
+
+# def custom_print(*args, **kwargs):
+#     # You can add conditions here to filter specific prints
+#     if not any(isinstance(arg, torch.Size) for arg in args):
+#         original_print(*args, **kwargs)
+
+# builtins.print = custom_print
 import argparse
 import math
 import torch
@@ -12,7 +23,11 @@ from numpy import *
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from torch.utils.tensorboard import SummaryWriter
 from denoising_diffusion_pytorch.utils import *
+import torch_pruning as tp
 import torchvision as tv
+
+# from test_pruning import pruning
+
 from denoising_diffusion_pytorch.encoder_decoder import AutoencoderKL
 # from denoising_diffusion_pytorch.transmodel import TransModel
 from denoising_diffusion_pytorch.uncond_unet import Unet
@@ -23,21 +38,68 @@ from fvcore.common.config import CfgNode
 from scipy import integrate
 from torchmetrics.functional import structural_similarity_index_measure as ssim
 from torchmetrics.functional import peak_signal_noise_ratio as psnr
+
+torch.backends.cuda.matmul.allow_tf32 = True
+## The flag below controls whether to allow TF32 on cuDNN. This flag defaults to True.
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision('medium')
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+
+
+def variance_of_laplacian(img):
+    # img: (B, 1, H, W)
+    laplacian_kernel = torch.tensor([[0, 1, 0],
+                                     [1, -4, 1],
+                                     [0, 1, 0]], dtype=img.dtype, device=img.device).unsqueeze(0).unsqueeze(0)  # (1,1,3,3)
+    lap = F.conv2d(img, laplacian_kernel, padding=1)
+    var = torch.var(lap, dim=[1,2,3])  # per-image variance
+    return var
+
+def calc_relative_loss(pred, target, all_relative, sample_size=2000):
+    # print("Target min:", target.min().item())
+    # print("Target max:", target.max().item())
+    relative_error = torch.abs(pred - target) / (torch.abs(target) + 1e-8)
+    relative_error = torch.sqrt(relative_error)
+
+    # print("Minimum relative error:", relative_error.min().item())
+
+    clipped_error = torch.clamp(relative_error, min=0.0, max=1)
+    
+    # scaled_error = torch.tanh(relative_error)
+    relative_error_np = clipped_error.detach().cpu().numpy().flatten()
+    sampled_data = np.random.choice(relative_error_np, size=sample_size, replace=False)
+    
+    all_relative.append(sampled_data)
+
 def calc_loss_test(pred1, pred2, target, metrics, error="MSE"):
+    pred3 = pred1
     criterion = nn.MSELoss()
+    mae_loss = nn.L1Loss()
 
     loss1 = criterion(pred1, target)/criterion(target, 0*target)
     loss2 = torch.sqrt(criterion(pred2, target))
+    # loss_mae = mae_loss(pred3, target)
+
+    # vol1 = variance_of_laplacian(pred1)
+    # vol_target = variance_of_laplacian(target)
+
+    # vol = vol1/vol_target
+    # vol_value = vol.mean().item()
+    # print(vol.data.cpu().numpy() * target.size(0))
 
     ssim1 = ssim(pred1, target)
+    # print(ssim1)
     #ssim2 = ssim(pred2, target)
 
     psnr1 = psnr(pred1,target)
 
     metrics['nmse'] += loss1.data.cpu().numpy() * target.size(0)
     metrics['rmse'] += loss2.data.cpu().numpy() * target.size(0)
+    # metrics['mae']  += loss_mae.data.cpu().numpy() * target.size(0)
     metrics['ssim'] += ssim1.data.cpu().numpy() * target.size(0)
     metrics['psnr'] += psnr1.data.cpu().numpy() * target.size(0)
+    # metrics['vol'] += vol_value * target.size(0)
 
     return [loss1,loss2]
 
@@ -46,6 +108,7 @@ def print_metrics_test(metrics, epoch_samples, error):
     for k in metrics.keys():
         outputs.append("{}: {:4f}".format(k, metrics[k] / epoch_samples))
     print("{}: {}".format("Test"+" "+error, ", ".join(outputs)))
+
 def parse_args():
     parser = argparse.ArgumentParser(description="training vae configure")
     parser.add_argument("--cfg", help="experiment configure file name", type=str, required=True)
@@ -61,6 +124,31 @@ def load_conf(config_file, conf={}):
         for k, v in exp_conf.items():
             conf[k] = v
     return conf
+
+
+def brightest_point_distance(gt: torch.Tensor, pred: torch.Tensor) -> float:
+    """
+    计算两个形状为 [1, 1, H, W] 的图像中最亮点的欧几里得距离。
+
+    参数:
+        gt: torch.Tensor，ground truth 图像 [1, 1, H, W]
+        pred: torch.Tensor，预测图像 [1, 1, H, W]
+
+    返回:
+        float: 最亮点之间的欧几里得距离
+    """
+    gt_2d = gt.squeeze()    # [256, 256]
+    pred_2d = pred.squeeze()
+
+    gt_idx = torch.argmax(gt_2d)
+    pred_idx = torch.argmax(pred_2d)
+
+    gt_y, gt_x = divmod(gt_idx.item(), gt_2d.shape[1])
+    pred_y, pred_x = divmod(pred_idx.item(), pred_2d.shape[1])
+
+    distance = math.sqrt((gt_x - pred_x) ** 2 + (gt_y - pred_y) ** 2)
+    return distance
+
 
 # Colors for all 20 parts
 part_colors = [[0, 0, 0], [255, 85, 0],  [255, 170, 0],
@@ -85,7 +173,7 @@ def main(args):
         embed_dim=first_stage_cfg.embed_dim,
         ckpt_path=first_stage_cfg.ckpt_path,
     )
-
+    
     if model_cfg.model_name == 'cond_unet':
         from denoising_diffusion_pytorch.mask_cond_unet import Unet
         unet_cfg = model_cfg.unet
@@ -101,7 +189,9 @@ def main(args):
                     window_sizes2=unet_cfg.window_sizes2,
                     fourier_scale=unet_cfg.fourier_scale,
                     cfg=unet_cfg,
+                    carsDPM=unet_cfg.DPMCARK
                     )
+        
     else:
         raise NotImplementedError
     if model_cfg.model_type == 'const_sde':
@@ -122,7 +212,7 @@ def main(args):
         scale_by_softsign=model_cfg.scale_by_softsign,
         default_scale=model_cfg.get('default_scale', False),
         input_keys=model_cfg.input_keys,
-        ckpt_path=model_cfg.ckpt_path,
+        # ckpt_path=model_cfg.ckpt_path,
         ignore_keys=model_cfg.ignore_keys,
         only_model=model_cfg.only_model,
         start_dist=model_cfg.start_dist,
@@ -141,7 +231,28 @@ def main(args):
         )
         # dataset = torch.utils.data.ConcatDataset([dataset] * 5)
     elif data_cfg['name'] == 'radio':
-        dataset = loaders.RadioUNet_c(phase="test")
+        dataset = loaders.RadioUNet_c(phase="test", dir_dataset="/home/disk01/qmzhang/RadioMapSeer/")
+
+    elif data_cfg['name'] == 'IRT4':
+        dataset = loaders.RadioUNet_c_sprseIRT4(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="IRT4",carsSimul="no",carsInput="no")
+    elif data_cfg['name'] == 'IRT4K':
+        dataset = loaders.RadioUNet_c_sprseIRT4_K2(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="IRT4",carsSimul="no",carsInput="K2")
+    elif data_cfg['name'] == 'DPMK':
+        dataset = loaders.RadioUNet_c_K2(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="DPM",carsSimul="no",carsInput="K2")
+    elif data_cfg['name'] == 'DPMCAR': #参数默认进入car_gain_image
+        dataset = loaders.RadioUNet_c_WithCar_NOK_or_K(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="DPM", have_K2="no")
+    elif data_cfg['name'] == 'DPMCARK': #参数默认进入car_gain_image
+        dataset = loaders.RadioUNet_c_WithCar_NOK_or_K(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="DPM", have_K2="yes")
+    elif data_cfg['name'] == 'MASK':
+        dataset = loaders.RadioUNet_s(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/",mask=True)
+    elif data_cfg['name'] == 'MASK_R':
+        dataset = loaders.RadioUNet_s(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/")
+    elif data_cfg['name'] == 'RANDOM':
+        dataset = loaders.RadioUNet_s_random(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", mask=True)
+    elif data_cfg['name'] == 'VERTEX':
+        dataset = loaders.RadioUNet_s_vertex(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", mask=True)
+    elif data_cfg['name'] == 'VERTEX_R':
+        dataset = loaders.RadioUNet_s_vertex(phase="test",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/")
     else:
         raise NotImplementedError
     dl = DataLoader(dataset, batch_size=cfg.sampler.batch_size, shuffle=False, pin_memory=True,
@@ -155,12 +266,15 @@ def main(args):
         results_folder=sampler_cfg.save_folder,cfg=cfg,
     )
     sampler.sample()
-    if data_cfg.name == 'cityscapes' or data_cfg.name == 'sr' or data_cfg.name == 'edge':
-        exit()
-    else:
-        assert len(os.listdir(sampler_cfg.target_path)) > 0, "{} have no image !".format(sampler_cfg.target_path)
-        sampler.cal_fid(target_path=sampler_cfg.target_path)
-    pass
+    
+    # BY PLZHENG
+    # useless code
+    # if data_cfg.name == 'cityscapes' or data_cfg.name == 'sr' or data_cfg.name == 'edge':
+    #     exit()
+    # else:
+    #     assert len(os.listdir(sampler_cfg.target_path)) > 0, "{} have no image !".format(sampler_cfg.target_path)
+    #     sampler.cal_fid(target_path=sampler_cfg.target_path)
+    # pass
 
 
 def nmse(res, target):
@@ -183,9 +297,15 @@ class Sampler(object):
         ddp_handler = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
             split_batches=True,
-            mixed_precision='no',
+            # BY PLZHENG
+            # use fp16
+            mixed_precision= 'fp16' if cfg.sampler.use_fp16 else 'no',
+            
             kwargs_handlers=[ddp_handler],
         )
+        # BY PLZHENG
+        print(f"***using fp16 while sampling: [{cfg.sampler.use_fp16}]***")
+        
         self.model = model
         self.sample_num = sample_num
         self.rk45 = rk45
@@ -208,11 +328,11 @@ class Sampler(object):
         if self.accelerator.is_main_process:
             self.results_folder.mkdir(exist_ok=True, parents=True)
             # self.results_folder_cond.mkdir(exist_ok=True, parents=True)
-
-        self.model = self.accelerator.prepare(self.model)
+        # Load model and checkpoint
         data = torch.load(cfg.sampler.ckpt_path, map_location=lambda storage, loc: storage)
+        model = self.model
 
-        model = self.accelerator.unwrap_model(self.model)
+        # Load state dict
         if cfg.sampler.use_ema:
             sd = data['ema']
             new_sd = {}
@@ -223,9 +343,42 @@ class Sampler(object):
             sd = new_sd
             model.load_state_dict(sd)
         else:
-            model.load_state_dict(data['model'])
+            model.load_state_dict(data['model'], strict=False)
         if 'scale_factor' in data['model']:
             model.scale_factor = data['model']['scale_factor']
+
+        # Calculate initial parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        
+        if self.accelerator.is_main_process:
+            print(f'Initial Total Parameters: {total_params:,}')
+            print(f'Initial Trainable Parameters: {trainable_params:,}')
+
+        # Prune model
+        #model.model = pruning(model.model.cpu(), 0.9).cuda()
+            
+        
+        # 先量化 再accelerator封装
+        # print('Begin QAT...')
+        
+        # model.model = torch.quantization.quantize_dynamic(
+        #     self.model.model,  # 需要量化的子模型
+        #     {torch.nn.Conv2d,torch.nn.BatchNorm2d},  # 指定量化模块，这里只指定Linear层
+        #     dtype=torch.quint4x2  # 使用int8量化
+        # )   
+        # print(self.model.model)
+
+        self.model = self.accelerator.prepare(model)
+        
+        # Calculate pruned parameters
+        # pruned_model = self.accelerator.unwrap_model(self.model)
+        # total_params = sum(p.numel() for p in pruned_model.parameters()) 
+        # trainable_params = sum(p.numel() for p in pruned_model.parameters() if p.requires_grad)
+
+        # if self.accelerator.is_main_process:
+        #     print(f'Pruned Total Parameters: {total_params:,}')
+        #     print(f'Pruned Trainable Parameters: {trainable_params:,}')
 
     def sample(self):
         metrics = defaultdict(float)
@@ -233,50 +386,165 @@ class Sampler(object):
         device = accelerator.device
         epoch_samples = 0
         batch_num = self.batch_num
+        self.model.eval()
+        all_relative_errors = []
         with torch.no_grad():
-            self.model.eval()
-            psnr = 0.
-            num = 0
-            nmse_ = []
-            for idx, batch in tqdm(enumerate(self.dl)):
+            with accelerator.autocast():
+                psnr = 0.
+                num = 0
+                nmse_ = []
+                
+                accelerator.print("\n-------------------------------------\n")
+                # BY PLZHENG
+                # ['WARM_UP', 'INFERENCE']
+                Stage = ['WARM_UP', 'INFERENCE']
+                for stage in Stage:
+                    # clone the test_loader
+                    tmp_dl = deepcopy(self.dl)
+                    # prepare for 'WARM_UP'
+                    if stage == 'WARM_UP':
+                        if self.cfg.sampler.warm_up_steps == 0:
+                            accelerator.print("***no warm up!***")
+                            continue
+                        accelerator.print("***starting warm up the device...***")
+                        warm_up_stop_idx = builtins.max(0, self.cfg.sampler.warm_up_steps // self.cfg.model.sampling_timesteps)
+                        
+                    # prepare for 'INFERENCE'
+                    elif stage == 'INFERENCE':
+                        accelerator.print("***starting inference stage...***")
+                        accelerator.print(f"***dataloader length : {len(self.dl)}***")
+                        inference_stop_idx = builtins.min(self.cfg.sampler.inference_stop_idx, len(self.dl) - 1)
+                        whole_sample_times = []
+                        # use timer
+                        if self.cfg.sampler.use_timer:
+                            starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                            times = torch.zeros(inference_stop_idx + 1, device=device)
+                    
+                    total_dist = []
+                    # running the model
+                    for idx, batch in tqdm(enumerate(tmp_dl),  disable=not self.accelerator.is_main_process):
 
-                for key in batch.keys():
-                    if isinstance(batch[key], torch.Tensor):
-                        batch[key].to(device)
+                        for key in batch.keys():
+                            if isinstance(batch[key], torch.Tensor):
+                                batch[key].to(device)
 
 
-                # image = batch["image"]
-                # image = unnormalize_to_zero_to_one(image)
-                cond = batch['cond']
-                GT = batch['image']
-                print(GT.size())
-                # print(batch["raw_size"])
-                # raw_w = batch["raw_size"][0].item()      # default batch size = 1
-                # raw_h = batch["raw_size"][1].item()
-                img_name = batch["img_name"][0]
+                        # image = batch["image"]
+                        # image = unnormalize_to_zero_to_one(image)
+                        cond = batch['cond']    
+                        GT = batch['image']     
+                        #print(GT.size())
+                        # print(batch["raw_size"])
+                        # raw_w = batch["raw_size"][0].item()      # default batch size = 1
+                        # raw_h = batch["raw_size"][1].item()
+                        img_name = batch["img_name"][0]
 
-                mask = batch['ori_mask'] if 'ori_mask' in batch else None
-                bs = cond.shape[0]
-                if self.cfg.sampler.sample_type == 'whole':
-                    batch_pred = self.whole_sample(cond, raw_size=(raw_h, raw_w), mask=mask)
-                elif self.cfg.sampler.sample_type == 'slide':
-                    batch_pred = self.slide_sample(cond, crop_size=self.cfg.sampler.get('crop_size', [256, 256]), stride=self.cfg.sampler.stride, mask=mask)
-                else:
-                    raise NotImplementedError
-                calc_loss_test(batch_pred.cpu(), batch_pred.cpu(), (GT * 0.5 + 0.5).cpu(), metrics,
-                               'mse')
-                epoch_samples += batch_pred.size(0)
-                for j, (img, c) in enumerate(zip(batch_pred, cond)):
-                    file_name = self.results_folder / img_name
-                    tv.utils.save_image(img, str(file_name)[:-4] + ".png")
+                        mask = batch['ori_mask'] if 'ori_mask' in batch else None
+                        bs = cond.shape[0]
+                        
+                        # BY PLZHENG 
+                        # start the timer
+                        if stage == 'INFERENCE' and self.cfg.sampler.use_timer:
+                            starter.record()
+                        
+                        # INFERENCE
+                        if self.cfg.sampler.sample_type == 'whole':
+                            batch_pred = self.whole_sample(cond, raw_size=(raw_h, raw_w), mask=mask)
+                        elif self.cfg.sampler.sample_type == 'slide':
+                            start_time = time.time()
+                            batch_pred = self.slide_sample(cond, crop_size=self.cfg.sampler.get('crop_size', [256, 256]), stride=self.cfg.sampler.stride, mask=mask)
+                            end_time = time.time()
+                            whole_sample_times.append(end_time - start_time)
+                        else:
+                            raise NotImplementedError
+                        
+                        # BY PLZHENG
+                        # stop the timer
 
-                    nmse_.append(nmse(img.cpu(), (GT[0]*0.5+0.5).cpu()))
+                        # print(GT.shape)     #torch.Size([1, 1, 256, 256])
+                        # print(batch_pred.shape)     #torch.Size([1, 1, 256, 256])
+                        
 
-                # if idx == 50:
-                #      break
+                        dist = brightest_point_distance(GT, batch_pred)
+                        total_dist.append(dist)
+
+                        if stage == 'INFERENCE' and self.cfg.sampler.use_timer:
+                            ender.record()
+                            torch.cuda.synchronize()
+                            curr_time = starter.elapsed_time(ender) # 计算时间
+                            times[idx] = curr_time
+                        
+                            
+                        # BY PLZHENG
+                        # process 'WARM_UP'
+                        if stage == 'WARM_UP' and idx == warm_up_stop_idx:
+                            accelerator.print("***device is ready!***")
+                            break
+                        
+                        
+                        # BY PLZHENG
+                        # process 'INFERENCE'
+                        if stage == 'INFERENCE':
+                            calc_loss_test(batch_pred.cpu(), batch_pred.cpu(), (GT * 0.5 + 0.5).cpu(), metrics,
+                                        'mse')
+                            
+                            # calc_loss_test(batch_pred.cpu(), batch_pred.cpu(), GT.cpu(), metrics,
+                            #             'mse')
+
+                            
+                            calc_relative_loss(batch_pred.cpu(), (GT * 0.5 + 0.5).cpu(), all_relative_errors)
+
+                            epoch_samples += batch_pred.size(0)
+                            # print(epoch_samples)
+                            for j, (img, c) in enumerate(zip(batch_pred, cond)):
+                                file_name = self.results_folder / img_name
+                                """
+                                ==========================================================================================
+                                """
+                                # img = (img + 1) / 2
+                                tv.utils.save_image(img, str(file_name)[:-4] + ".png")
+                                nmse_.append(nmse(img.cpu(), (GT[0]*0.5+0.5).cpu()))
+                            if idx == inference_stop_idx:
+                                import numpy as np
+                                import matplotlib.pyplot as plt
+                                import seaborn as sns
+                                
+                                # all_errors = np.concatenate(all_relative_errors)
+                                # filtered_errors = all_errors[all_errors > 1e-3]
+                                # plt.hist(filtered_errors, bins=100, color='blue', edgecolor='black', alpha=0.4, density=True)
+                                # sns.kdeplot(filtered_errors, color='red', lw=1.5)
+                                # # plt.xlim(0, 1) 
+                                # # sns.kdeplot(all_errors, bw_adjust=0.5, fill=True)
+                                # plt.xlabel("Relative Error")
+                                # plt.ylabel("Density")
+                                # plt.title("Relative Error Distribution")
+                                # plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+                                # plt.savefig("relative_error_distribution_vertical.png", dpi=300, bbox_inches='tight')    
+                                # plt.show()
+
+
+                                if self.cfg.sampler.use_timer:
+                                    # accelerator.print("\n-------------------------------------\n")
+                                    # accelerator.print("times : ", times)
+                                    # mean_time = times.mean().item()
+                                    # accelerator.print("\n-------------------------------------\n")
+                                    # accelerator.print("***Inference time: {:.6f} ms***".format(mean_time))
+                                    
+                                    times_all = accelerator.gather(times)
+                                    if accelerator.is_main_process:
+                                        mean_time = times_all.mean().item()
+                                        accelerator.print("\n-------------------------------------\n")
+                                        accelerator.print("***Global Inference time: {:.6f} ms***".format(mean_time))
+                                break  #by zhangqiming
+                        
+                    if self.cfg.sampler.sample_type == 'slide':
+                        avg_time = sum(whole_sample_times)/ len(whole_sample_times)
+                        print(f'Average whole sample time: {avg_time:.4f} seconds')
         print_metrics_test(metrics, epoch_samples, 'mse')
+        avg_dist = sum(total_dist) / len(total_dist)
+        print(f"平均最亮点距离为: {avg_dist}")
         accelerator.print('sampling complete')
-        print(mean(nmse_))
+        # accelerator.print(f'nmse_: {mean(nmse_)}')
 
     # ----------------------------------waiting revision------------------------------------
     def slide_sample(self, inputs, crop_size, stride, mask=None):
@@ -313,10 +581,12 @@ class Sampler(object):
             for w_idx in range(w_grids):
                 y1 = h_idx * h_stride
                 x1 = w_idx * w_stride
-                y2 = min(y1 + h_crop, h_img)
-                x2 = min(x1 + w_crop, w_img)
-                y1 = max(y2 - h_crop, 0)
-                x1 = max(x2 - w_crop, 0)
+                # print(y1, h_crop, h_img)
+                y2 = builtins.min(y1 + h_crop, h_img)
+                
+                x2 = builtins.min(x1 + w_crop, w_img)
+                y1 = builtins.max(y2 - h_crop, 0)
+                x1 = builtins.max(x2 - w_crop, 0)
                 crop_img = inputs[:, :, y1:y2, x1:x2]
 
                 if isinstance(self.model, nn.parallel.DistributedDataParallel):

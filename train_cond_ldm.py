@@ -17,6 +17,47 @@ from torch.utils.data import DataLoader
 from multiprocessing import cpu_count
 from fvcore.common.config import CfgNode
 
+# from accelerate import AccelerateConfig
+import os
+
+import os
+import yaml
+
+
+acconfig = {
+    'compute_environment': 'LOCAL_MACHINE',
+    'debug': False,
+    'distributed_type': 'NO',
+    'downcast_bf16': 'no',
+    'enable_cpu_affinity': True,
+    'gpu_ids': '3',  #直接改这个
+    'machine_rank': 0,
+    'main_training_function': 'main',
+    'mixed_precision': 'no',
+    'num_machines': 1,
+    'num_processes': 1,
+    'rdzv_backend': 'static',
+    'same_network': True,
+    'tpu_env': [],
+    'tpu_use_cluster': False,
+    'tpu_use_sudo': False,
+    'use_cpu': False,
+}
+
+# 设置配置文件路径
+config_dir = os.path.expanduser('/home/zhangqiming/.cache/huggingface/accelerate')
+os.makedirs(config_dir, exist_ok=True)
+
+config_path = os.path.join(config_dir, 'default_config.yaml')
+
+# 写入 YAML 文件
+with open(config_path, 'w') as f:
+    yaml.dump(acconfig, f)
+
+print(f"配置写入成功：{config_path}")
+
+
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="training vae configure")
@@ -33,6 +74,27 @@ def load_conf(config_file, conf={}):
         for k, v in exp_conf.items():
             conf[k] = v
     return conf
+
+def save_model_freeze_report(model, file_path='model_freeze_report.txt'):
+    with open(file_path, 'w') as f:
+        total_params = 0
+        frozen_params = 0
+
+        for name, param in model.named_parameters():
+            num_params = param.numel()
+            total_params += num_params
+            if not param.requires_grad:
+                frozen_params += num_params
+            status = 'Frozen' if not param.requires_grad else 'Trainable'
+            f.write(f'{name:60} | {status:8} | Params: {num_params}\n')
+
+        f.write('\n')
+        f.write(f'Total parameters: {total_params}\n')
+        f.write(f'Frozen parameters: {frozen_params}\n')
+        f.write(f'Trainable parameters: {total_params - frozen_params}\n')
+        f.write(f'Frozen ratio: {frozen_params / total_params:.2%}\n')
+
+    print(f'Model freeze report saved to {file_path}')
 
 
 def main(args):
@@ -51,6 +113,7 @@ def main(args):
     if model_cfg.model_name == 'cond_unet':
         from denoising_diffusion_pytorch.mask_cond_unet import Unet
         unet_cfg = model_cfg.unet
+
         unet = Unet(dim=unet_cfg.dim,
                     channels=unet_cfg.channels,
                     dim_mults=unet_cfg.dim_mults,
@@ -62,8 +125,32 @@ def main(args):
                     window_sizes1=unet_cfg.window_sizes1,
                     window_sizes2=unet_cfg.window_sizes2,
                     fourier_scale=unet_cfg.fourier_scale,
+                    carsDPM=unet_cfg.DPMCARK,
                     cfg=unet_cfg,
                     )
+
+
+
+    elif model_cfg.model_name == 'cond_unet_8bit':
+        from denoising_diffusion_pytorch.mask_cond_unet import Unet
+        unet_cfg = model_cfg.unet
+        unet = Unet(dim=unet_cfg.dim,
+                    channels=unet_cfg.channels, 
+                    dim_mults=unet_cfg.dim_mults,
+                    learned_variance=unet_cfg.get('learned_variance', False),
+                    out_mul=unet_cfg.out_mul,
+                    cond_in_dim=unet_cfg.cond_in_dim,
+                    cond_dim=unet_cfg.cond_dim,
+                    cond_dim_mults=unet_cfg.cond_dim_mults,
+                    window_sizes1=unet_cfg.window_sizes1,
+                    window_sizes2=unet_cfg.window_sizes2,
+                    fourier_scale=unet_cfg.fourier_scale,
+                    cfg=unet_cfg,
+                    )
+        # Convert model to 8-bit quantization
+        # unet = torch.quantization.quantize_dynamic(
+        #     unet, {torch.nn.Linear, torch.nn.Conv2d}, dtype=torch.qint8
+        # )
     else:
         raise NotImplementedError
     if model_cfg.model_type == 'const_sde':
@@ -101,13 +188,67 @@ def main(args):
             augment_horizontal_flip=data_cfg.augment_horizontal_flip,
             cfg=data_cfg
         )
+    #=======================这个是用来之前做K图关键数据集加载部分 四月份重要部分====================================#
     elif data_cfg['name'] == 'radio':
-        dataset = loaders.RadioUNet_c(phase="train")
+        dataset = loaders.RadioUNet_c(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/",simulation="DPM",carsSimul="no",carsInput="no")
+    elif data_cfg['name'] == 'IRT4':
+        dataset = loaders.RadioUNet_c_sprseIRT4(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="IRT4",carsSimul="no",carsInput="no")
+    # elif data_cfg['name'] == 'CARIRT4':
+    #     dataset = loaders.RadioUNet_c_sprseIRT4(phase="train",dir_dataset="/home/DataDisk/qmzhang/RadioMapSeer/", simulation="IRT4",carsSimul="no",carsInput="no")
+    elif data_cfg['name'] == 'IRT4K':
+        dataset = loaders.RadioUNet_c_sprseIRT4_K2(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="IRT4",carsSimul="no",carsInput="K2")
+    elif data_cfg['name'] == 'DPMK':
+        dataset = loaders.RadioUNet_c_K2(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="DPM",carsSimul="no",carsInput="K2")
+    elif data_cfg['name'] == 'DPMCAR':
+        dataset = loaders.RadioUNet_c_WithCar_NOK_or_K(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="DPM", have_K2="no")
+    elif data_cfg['name'] == 'DPMCARK':
+        dataset = loaders.RadioUNet_c_WithCar_NOK_or_K(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", simulation="DPM", have_K2="yes")
+
+    #=======================这一部分是用来加载建筑物边缘采样的关键数据集部分 五月份重要部分=============================#
+    elif data_cfg['name'] == 'MASK':
+        dataset = loaders.RadioUNet_s(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/",mask=True)
+    elif data_cfg['name'] == 'MASK_R':
+        dataset = loaders.RadioUNet_s(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/")
+    elif data_cfg['name'] == 'RANDOM':
+        dataset = loaders.RadioUNet_s_random(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", mask=True)
+    elif data_cfg['name'] == 'VERTEX':
+        dataset = loaders.RadioUNet_s_vertex(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/", mask=True)
+    elif data_cfg['name'] == 'VERTEX_R':
+        dataset = loaders.RadioUNet_s_vertex(phase="train",dir_dataset="/home/disk01/qmzhang/RadioMapSeer/")
     else:
         raise NotImplementedError
-    dl = DataLoader(dataset, batch_size=data_cfg.batch_size, shuffle=True, pin_memory=True,
-                    num_workers=data_cfg.get('num_workers', 2))
+    
+    # dl = DataLoader(dataset, batch_size=data_cfg.batch_size, shuffle=True, pin_memory=True,
+    #                 num_workers=data_cfg.get('num_workers', 2))
+    
+    dl = DataLoader(dataset, batch_size=data_cfg.batch_size, shuffle=True)
+
+    # # by zhangqiming
+    # batch = next(iter(dl))
+    # images = batch['image']  # 提取图像
+    # conds = batch['cond']  # 提取条件信息
+    # names = batch['img_name']  # 提取图片名称
+
+    # print(f"======={conds.shape}======")
+    # import torch
+    # import os
+    # from torchvision.utils import save_image
+    # save_dir = './saved_channels/'
+    # os.makedirs(save_dir, exist_ok=True)
+    # for i in range(conds.size(0)):  # 遍历每张图像
+    #     for j in range(conds.size(1)):  # 遍历每个通道
+    #         # 获取当前通道的图像
+    #         channel_image = conds[i, j, :, :]  # shape: [256, 256]
+    #         # 构造保存的文件名
+    #         filename = f"{save_dir}/image_{i}_channel_{j}.png"
+    #         # 保存图像
+    #         save_image(channel_image, filename)
+    #         print(f"Saved {filename}")
+
+
+    
     train_cfg = cfg.trainer
+    # from test_pruning import pruning
     trainer = Trainer(
         ldm, dl, train_batch_size=data_cfg.batch_size,
         gradient_accumulate_every=train_cfg.gradient_accumulate_every,
@@ -122,6 +263,7 @@ def main(args):
             with torch.no_grad():
                 for datatmp in dl:
                     break
+                print(type(datatmp))
                 if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
                     all_images, *_ = trainer.model.module.sample(batch_size=datatmp['cond'].shape[0],
                                                   cond=datatmp['cond'].to(trainer.accelerator.device),
@@ -159,6 +301,7 @@ class Trainer(object):
             resume_milestone=0,
             cfg={},
     ):
+        
         super().__init__()
         ddp_handler = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
@@ -190,9 +333,21 @@ class Trainer(object):
         dl = self.accelerator.prepare(data_loader)
         self.dl = cycle(dl)
 
+        #by zhangqiming  finetune入口
+        if cfg.finetune.ckpt_path is not None:
+            data = torch.load(cfg.finetune.ckpt_path, map_location=lambda storage, loc: storage)
+            model = self.model
+            model.load_state_dict(data['model'], strict=False)
+
+            if 'scale_factor' in data['model']:
+                model.scale_factor = data['model']['scale_factor']
+
         # optimizer
         self.opt = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                                      lr=train_lr, weight_decay=train_wd)
+        
+        # save_model_freeze_report(model)
+
         lr_lambda = lambda iter: max((1 - iter / train_num_steps) ** 0.96, cfg.trainer.min_lr)
         self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.opt, lr_lambda=lr_lambda)
         # for logging results in a folder periodically
@@ -209,8 +364,11 @@ class Trainer(object):
 
         # prepare model, dataloader, optimizer with accelerator
 
+        # self.model, self.opt, self.lr_scheduler = \
+        #     self.accelerator.prepare(self.model, self.opt, self.lr_scheduler)
+
         self.model, self.opt, self.lr_scheduler = \
-            self.accelerator.prepare(self.model, self.opt, self.lr_scheduler)
+            self.accelerator.prepare(model, self.opt, self.lr_scheduler)
         self.logger = create_logger(root_dir=results_folder)
         self.logger.info(cfg)
         self.writer = SummaryWriter(results_folder)
@@ -291,8 +449,8 @@ class Trainer(object):
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
 
-                        loss_simple = log_dict["train/loss_simple"].item() / self.gradient_accumulate_every
-                        loss_vlb = log_dict["train/loss_vlb"].item() / self.gradient_accumulate_every
+                        loss_simple = log_dict["train/loss_simple"] / self.gradient_accumulate_every
+                        loss_vlb = log_dict["train/loss_vlb"] / self.gradient_accumulate_every
                         total_loss_dict['loss_simple'] += loss_simple
                         total_loss_dict['loss_vlb'] += loss_vlb
                         total_loss_dict['total_loss'] += total_loss
@@ -345,18 +503,67 @@ class Trainer(object):
                             # all_images_list = list(map(lambda n: self.model.module.validate_img(ns=self.batch_size), batches))
                             if isinstance(self.model, nn.parallel.DistributedDataParallel):
                                 # all_images = self.model.module.sample(batch_size=self.batch_size)
-                                all_images, *_ = self.model.module.sample(batch_size=batch['cond'].shape[0],
-                                                  cond=batch['cond'],
-                                                  mask=batch['ori_mask'] if 'ori_mask' in batch else None)
+                                if 'cond' in batch.keys():
+                                    all_images, *_ = self.model.module.sample(batch_size=batch['cond'].shape[0],
+                                                    cond=batch['cond'],
+                                                    mask=batch['ori_mask'] if 'ori_mask' in batch else None)
+                                else:
+                                    all_images, *_ = self.model.module.sample(batch_size=self.batch_size)
+                                
                             elif isinstance(self.model, nn.Module):
                                 # all_images = self.model.sample(batch_size=self.batch_size)
                                 all_images, *_ = self.model.sample(batch_size=batch['cond'].shape[0],
                                                   cond=batch['cond'],
                                                   mask=batch['ori_mask'] if 'ori_mask' in batch else None)
+                                # pred = 
+                                # print("=========================================")
                             # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
 
                         # all_images = torch.cat(all_images_list, dim = 0)
                         # nrow = 2 ** math.floor(math.log2(math.sqrt(self.batch_size)))
+
+                        # import torch
+                        import math
+
+                        def compute_brightest_point_distance(first_image, other_image):
+                            """
+                            计算两个单通道图像中最亮点的欧几里得距离。
+
+                            参数:
+                                first_image: torch.Tensor，形状为 [1, 256, 256]
+                                other_image: torch.Tensor，形状为 [1, 256, 256]
+
+                            返回:
+                                float: 两个最亮点之间的欧几里得距离
+                            """
+                            # 去掉通道维度
+                            first_image_2d = first_image.squeeze(0)  # [256, 256]
+                            other_image_2d = other_image.squeeze(0)  # [256, 256]
+
+                            # 找 first_image 的最亮点位置
+                            first_max_idx = torch.argmax(first_image_2d)
+                            first_y, first_x = divmod(first_max_idx.item(), first_image_2d.shape[1])
+
+                            # 找 other_image 的最亮点位置
+                            other_max_idx = torch.argmax(other_image_2d)
+                            other_y, other_x = divmod(other_max_idx.item(), other_image_2d.shape[1])
+
+                            # 计算欧几里得距离
+                            distance = math.sqrt((first_x - other_x) ** 2 + (first_y - other_y) ** 2)
+                            return distance
+
+                        
+                        import torchvision.utils as vutils
+
+                        gt = batch['image'] #torch.Size([8, 1, 256, 256])
+                        first_image = gt[0]
+                        first_image = (first_image + 1) / 2
+                        distance = compute_brightest_point_distance(first_image, all_images)
+                        print(f"最亮点之间的距离: {distance}")
+                        vutils.save_image(first_image, str(self.results_folder / f'gt-sample-{milestone}.png'))
+                        # print(gt.shape)
+                        # print(all_images.shape)
+
                         nrow = 2 ** math.floor(math.log2(math.sqrt(batch['cond'].shape[0])))
                         tv.utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow=nrow)
                         self.model.train()
