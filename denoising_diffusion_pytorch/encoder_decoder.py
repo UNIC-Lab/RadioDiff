@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from einops import rearrange
-from .loss import LPIPSWithDiscriminator
+from .loss import LPIPSWithDiscriminator, LPIPSWithDiscriminator_Edge, LPIPSWithDiscriminator_DPM2IRT4
 
 # from ldm.util import instantiate_from_config
 # from ldm.modules.attention import LinearAttention
@@ -908,6 +908,8 @@ class AutoencoderKL(nn.Module):
         self.decoder = Decoder(**ddconfig)
         self.down_ratio = 2 ** (len(ddconfig['ch_mult']) - 1)
         self.loss = LPIPSWithDiscriminator(**lossconfig)
+        self.loss_pinn = LPIPSWithDiscriminator_Edge(**lossconfig)
+        self.loss_pinn_dpm2irt4 = LPIPSWithDiscriminator_DPM2IRT4(**lossconfig)
         assert ddconfig["double_z"]
         self.quant_conv = torch.nn.Conv2d(2*ddconfig["z_channels"], 2*embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
@@ -997,6 +999,52 @@ class AutoencoderKL(nn.Module):
             # self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
             return discloss, log_dict_disc
 
+    def training_step_PINN(self, inputs, k2_neg_norm, optimizer_idx, global_step):
+        # inputs = self.get_input(batch, self.image_key)
+        reconstructions, posterior = self(inputs)
+
+        if optimizer_idx == 0:
+            # train encoder+decoder+logvar
+            aeloss, log_dict_ae = self.loss_pinn(inputs, reconstructions, posterior, k2_neg_norm, optimizer_idx, global_step,
+                                            last_layer=self.get_last_layer(), split="train")
+            # self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            # self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            return aeloss, log_dict_ae
+
+        if optimizer_idx == 1:
+            # train the discriminator
+            discloss, log_dict_disc = self.loss_pinn(inputs, reconstructions, posterior, k2_neg_norm, optimizer_idx, global_step,
+                                                last_layer=self.get_last_layer(), split="train")
+
+            # self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            # self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            
+            return discloss, log_dict_disc
+        
+    def training_step_DPM2IRT4(self, inputs, inputs_IRT4, Tx_pos_mask, k2_neg_norm, optimizer_idx, global_step):
+        # inputs = self.get_input(batch, self.image_key)
+        reconstructions, posterior = self(inputs)
+
+        if optimizer_idx == 0:
+            # train encoder+decoder+logvar
+            aeloss, log_dict_ae = self.loss_pinn_dpm2irt4(inputs_IRT4, reconstructions, posterior, 
+                                                          Tx_pos_mask, k2_neg_norm, optimizer_idx, global_step,
+                                            last_layer=self.get_last_layer(), split="train")
+            # self.log("aeloss", aeloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            # self.log_dict(log_dict_ae, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            return aeloss, log_dict_ae
+
+        if optimizer_idx == 1:
+            # train the discriminator
+            discloss, log_dict_disc = self.loss_pinn_dpm2irt4(inputs_IRT4, reconstructions, posterior, 
+                                                            Tx_pos_mask, k2_neg_norm, optimizer_idx, global_step,
+                                                last_layer=self.get_last_layer(), split="train")
+
+            # self.log("discloss", discloss, prog_bar=True, logger=True, on_step=True, on_epoch=True)
+            # self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            
+            return discloss, log_dict_disc
+        
     def validation_step(self, inputs, global_step):
         # inputs = self.get_input(batch, self.image_key)
         reconstructions, posterior = self(inputs)
@@ -1010,11 +1058,32 @@ class AutoencoderKL(nn.Module):
         # self.log_dict(log_dict_ae)
         # self.log_dict(log_dict_disc)
         return log_dict_ae, log_dict_disc
+    
+    def validation_step_PINN(self, inputs, k2_neg_norm, global_step):
+        reconstructions, posterior = self(inputs)
+        aeloss, log_dict_ae = self.loss_pinn(inputs, reconstructions, posterior, k2_neg_norm, 0, global_step,
+                                            last_layer=self.get_last_layer(), split="val")
+        
+        discloss, log_dict_disc = self.loss_pinn(inputs, reconstructions, posterior, k2_neg_norm, 1, global_step,
+                                            last_layer=self.get_last_layer(), split="val")
+        
+        return log_dict_ae, log_dict_disc
 
+    def validation_step_DPM2IRT4(self, inputs, inputs_IRT4, k2_neg_norm, global_step):
+        reconstructions, posterior = self(inputs)
+        aeloss, log_dict_ae = self.loss_pinn_dpm2irt4(inputs_IRT4, reconstructions, posterior, k2_neg_norm, 0, global_step,
+                                            last_layer=self.get_last_layer(), split="val")
+        
+        return log_dict_ae
+    
     def validate_img(self, inputs):
         reconstructions, posterior = self(inputs)
         return reconstructions
-
+    
+    def get_z(self, inputs):
+        posterior = self.encode(inputs)
+        z = posterior.mode()
+        return z
     # def configure_optimizers(self):
     #     lr = self.learning_rate
     #     opt_ae = torch.optim.Adam(list(self.encoder.parameters())+
@@ -1027,6 +1096,7 @@ class AutoencoderKL(nn.Module):
     #     return [opt_ae, opt_disc], []
 
     def get_last_layer(self):
+        # print("last layer: ", self.decoder.conv_out.requires_grad)
         return self.decoder.conv_out.weight
     '''
     @torch.no_grad()

@@ -661,9 +661,12 @@ class Unet(nn.Module):
         ckpt_path=None,
         ignore_keys=[],
         cfg={},
+        carsDPM=False,
         **kwargs
     ):
         super().__init__()
+
+        self.carsDPM = carsDPM
 
         # determine dimensions
         self.cond_pe = cfg.get('cond_pe', False)
@@ -694,7 +697,7 @@ class Unet(nn.Module):
                 self.init_conv_mask = resnet101()
             else:
                 self.init_conv_mask = resnet101(weights=ResNet101_Weights)
-        elif cfg.cond_net == 'swin':
+        elif cfg.cond_net == 'swin':  #默认用的是这个
             f_condnet = 128
             if cfg.get('without_pretrain', False):
                 self.init_conv_mask = swin_b()
@@ -712,6 +715,9 @@ class Unet(nn.Module):
             nn.Conv2d(input_channels + f_condnet, init_dim, 7, padding=3),
             nn.GroupNorm(num_groups=min(init_dim // 4, 8), num_channels=init_dim),
         )
+
+        #by zhangqiming
+        self.init_conv_carK = nn.Conv2d(in_channels=5, out_channels=3, kernel_size=1)
 
         if self.cond_pe:
             self.cond_pos_embedding = nn.Sequential(
@@ -889,10 +895,20 @@ class Unet(nn.Module):
                 nn.init.constant_(m.bias, 0.)
 
     def forward(self, x, time, mask, x_self_cond = None, **kwargs):
-        #print(x.size(), '------------------')
+        # print(x.size(), 'x')
+        # print(time.shape,'---', mask.shape, 'time and mask')
+
+        # input0 = mask[:, :3, :, :] # 取前三个通道  这个对应正常的mask
+        # input1 = mask[:, 3:, :, :] # 取第 4 个通道
+
+        if self.carsDPM==True:
+            mask1 = self.init_conv_carK(mask)
+            # print(f"mask1:{mask1.shape}")
+
         if self.self_condition:
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
             x = torch.cat((x_self_cond, x), dim = 1)
+
         sigma = time.reshape(-1, 1, 1, 1)
         eps = 1e-4
         c_skip1 = 1 - sigma
@@ -905,7 +921,12 @@ class Unet(nn.Module):
         x_clone = x.clone()
         x = c_in * x
         # mask = torch.cat([], dim=1)
-        hm = self.init_conv_mask(mask)
+
+        if self.carsDPM==True:
+            hm = self.init_conv_mask(mask1)  #这个地方是用来融合条件的,后面基本与mask这个变量无关,carK改成mask1
+        else: #默认走这一步
+            hm = self.init_conv_mask(mask)
+        # print(hm.shape)
         # if self.cond_pe:
         #     m = self.cond_pos_embedding(m)
         x = self.init_conv(torch.cat([x, F.interpolate(hm[0], size=x.shape[-2:], mode="bilinear")], dim=1))
@@ -947,10 +968,10 @@ class Unet(nn.Module):
         x = self.mid_block1(x, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t)
-        # x1 = x + self.decouple1(x)
-        # x2 = x + self.decouple2(x)
-        x1 = x
-        x2 = x
+        x1 = x + self.decouple1(x)
+        x2 = x + self.decouple2(x)
+        # x1 = x
+        # x2 = x
         x = x1
         for (block1, block2, attn, upsample), relation_layer in zip(self.ups, self.relation_layers_up):
             x = torch.cat((x, h.pop()), dim = 1)
@@ -982,6 +1003,7 @@ class Unet(nn.Module):
         # scale_C = torch.exp(sigma)
         x1 = c_skip1 * x_clone + c_out1 * x1
         x2 = c_skip2 * x_clone + c_out2 * x2
+
         return x1, x2
 
 
@@ -991,19 +1013,25 @@ if __name__ == "__main__":
     # effnet = efficientnet_b7(weights=None)
     # x = torch.rand(1, 3, 320, 320)
     # y = effnet(x)
-    model = Unet(dim=128, dim_mults=(1, 2, 4, 4),
-                 cond_dim=128,
-                 cond_dim_mults=(2, 4, ),
-                 channels=1,
-                 window_sizes1=[[8, 8], [4, 4], [2, 2], [1, 1]],
-                 window_sizes2=[[8, 8], [4, 4], [2, 2], [1, 1]],
-                 cfg=fvcore.common.config.CfgNode({'cond_pe': False, 'input_size': [80, 80],
-                      'cond_feature_size': (32, 128), 'cond_net': 'vgg',
-                      'num_pos_feats': 96})
-                 )
-    x = torch.rand(1, 1, 64, 64)
-    mask = torch.rand(1, 3, 320, 320)
-    time = torch.tensor([0.5124])
-    with torch.no_grad():
-        y = model(x, time, mask)
+    # import torch_pruning as tp
+    # model = Unet(dim=128, dim_mults=(1, 2, 4, 4),
+    #              cond_dim=128,
+    #              cond_dim_mults=(2, 4, ),
+    #              channels=1,
+    #              window_sizes1=[[8, 8], [4, 4], [2, 2], [1, 1]],
+    #              window_sizes2=[[8, 8], [4, 4], [2, 2], [1, 1]],
+    #              cfg=fvcore.common.config.CfgNode({'cond_pe': False, 'input_size': [80, 80],
+    #                   'cond_feature_size': (32, 128), 'cond_net': 'vgg',
+    #                   'num_pos_feats': 96})
+    #              )
+    # DG = tp.DependencyGraph().build_dependency(model, example_inputs=torch.randn(1, 1, 64, 64))
+    # group = DG.get_pruning_group( model.conv1, tp.prune_conv_out_channels, idxs=[2, 6, 9] )
+    # if DG.check_pruning_group(group): # avoid over-pruning, i.e., channels=0.
+    #     group.prune()
+    # print(group.details()) # or print(group)
+    # x = torch.rand(1, 1, 64, 64)
+    # mask = torch.rand(1, 3, 320, 320)
+    # time = torch.tensor([0.5124])
+    # with torch.no_grad():
+    #     y = model(x, time, mask)
     pass

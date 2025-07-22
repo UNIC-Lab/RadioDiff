@@ -13,6 +13,10 @@ from random import random, randint, sample, choice
 from .encoder_decoder import DiagonalGaussianDistribution
 import random
 from taming.modules.losses.vqperceptual import *
+import cv2
+import numpy as np
+import os
+import torchvision
 
 # gaussian diffusion trainer class
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
@@ -292,6 +296,12 @@ class DDPM(nn.Module):
         return loss, loss_dict
 
     def forward(self, x, *args, **kwargs):
+
+        #z c egde=x
+
+        # print("args:", args)
+        # print("kwargs:", kwargs)
+
         # continuous time, t in [0, 1]
         # t = []
         # for _ in range(x.shape[0]):
@@ -487,6 +497,66 @@ class DDPM(nn.Module):
                               up_scale=up_scale, unnormalize=True, cond=cond, denoise=denoise)
 
     @torch.no_grad()
+    def sample_cond(self, batch_size=16, up_scale=1, cond1=None, cond2=None, denoise=True, split_time=0.4):
+        image_size, channels = self.image_size, self.channels
+        if cond1 is not None and cond2 is not None:
+            batch_size = cond1.shape[0]
+        return self.sample_fn_by_split_cond((batch_size, channels, image_size[0], image_size[1]),
+                              up_scale=up_scale, unnormalize=True, cond1=cond1, cond2=cond2, denoise=denoise, split_time=split_time)
+    
+    @torch.no_grad()
+    def sample_fn_by_split_cond(self, shape, up_scale=1, unnormalize=True, cond1=None, cond2=None, denoise=False, split_time=0.4):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
+                                                                             self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+
+        # times = torch.linspace(-1, total_timesteps, steps=self.sampling_timesteps + 1).int()
+        # times = list(reversed(times.int().tolist()))
+        # time_pairs = list(zip(times[:-1], times[1:]))
+        # time_steps = torch.tensor([0.25, 0.15, 0.1, 0.09, 0.075, 0.06, 0.045, 0.03])
+        step = 1. / self.sampling_timesteps
+        # time_steps = torch.tensor([0.1]).repeat(10)
+        time_steps = torch.tensor([step]).repeat(self.sampling_timesteps)
+        if denoise:
+            eps = self.eps
+            time_steps = torch.cat((time_steps[:-1], torch.tensor([step - eps]), torch.tensor([eps])), dim=0)
+
+        if self.start_dist == 'normal':
+            img = torch.randn(shape, device=device)
+        elif self.start_dist == 'uniform':
+            img = 2 * torch.rand(shape, device=device) - 1.
+        else:
+            raise NotImplementedError(f'{self.start_dist} is not supported !')
+        img = F.interpolate(img, scale_factor=up_scale, mode='bilinear', align_corners=True)
+        # K = -1 * torch.ones_like(img)
+        cur_time = torch.ones((batch,), device=device)
+        for i, time_step in enumerate(time_steps):
+            s = torch.full((batch,), time_step, device=device)
+            if i == time_steps.shape[0] - 1:
+                s = cur_time
+            if cond1 is not None and cond2 is not None:
+                if cur_time > split_time:
+                    pred = self.model(img, cur_time, cond1)
+                else :
+                    pred = self.model(img, cur_time, cond2)
+            else:
+                pred = self.model(img, cur_time)
+            # C, noise = pred.chunk(2, dim=1)
+            C, noise = pred[:2]
+            # correct C
+            x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            if self.clip_x_start:
+                x0.clamp_(-1., 1.)
+                # C.clamp_(-2., 2.)
+            C = -1 * x0
+            img = self.pred_xtms_from_xt(img, noise, C, cur_time, s)
+            # img = self.pred_xtms_from_xt2(img, noise, C, cur_time, s)
+            cur_time = cur_time - s
+        img.clamp_(-1., 1.)
+        if unnormalize:
+            img = unnormalize_to_zero_to_one(img)
+        return img
+    
+    @torch.no_grad()
     def sample_fn(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
                                                                              self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
@@ -536,7 +606,7 @@ class DDPM(nn.Module):
         return img
 
 
-
+# from predictor import load_unet_engine
 class LatentDiffusion(DDPM):
     def __init__(self,
                  auto_encoder,
@@ -578,34 +648,57 @@ class LatentDiffusion(DDPM):
         assert sample_type in ['p_loop', 'ddim', 'dpm', 'transformer'] ###  'dpm' is not availible now, suggestion 'ddim'
         self.sample_type = sample_type
 
-        if ckpt_path is not None:
-            self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
-
+        # if ckpt_path is not None:
+        #     self.init_from_ckpt(ckpt_path, ignore_keys, only_model)
+        
+        
     def init_first_stage(self, first_stage_model):
         self.first_stage_model = first_stage_model.eval()
         # self.first_stage_model.train = disabled_train
         for param in self.first_stage_model.parameters():
             param.requires_grad = False
 
-    '''
-    def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
-        sd = torch.load(path, map_location="cpu")
-        if "state_dict" in list(sd.keys()):
-            sd = sd["state_dict"]
-        keys = list(sd.keys())
-        for k in keys:
-            for ik in ignore_keys:
-                if k.startswith(ik):
-                    print("Deleting key {} from state_dict.".format(k))
-                    del sd[k]
-        missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
-            sd, strict=False)
-        print(f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
-        if len(missing) > 0:
-            print(f"Missing Keys: {missing}")
-        if len(unexpected) > 0:
-            print(f"Unexpected Keys: {unexpected}")
-    '''
+    
+    # def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
+    #     sd = torch.load(path, map_location="cpu")
+    #     if "state_dict" in list(sd.keys()):
+    #         sd = sd["state_dict"]
+    #     keys = list(sd.keys())
+    #     for k in keys:
+    #         for ik in ignore_keys:
+    #             if k.startswith(ik):
+    #                 print("Deleting key {} from state_dict.".format(k))
+    #                 del sd[k]
+    #     missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
+    #         sd, strict=False)
+    #     print(f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
+    #     if len(missing) > 0:
+    #         print(f"Missing Keys: {missing}")
+    #     if len(unexpected) > 0:
+    #         print(f"Unexpected Keys: {unexpected}")
+
+    # def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
+    #     sd= torch.load(path, map_location=lambda storage, loc: storage)
+    #     # if "state_dict" in list(sd.keys()):
+    #     #     sd = sd["state_dict"]
+    #     # keys = list(sd.keys())
+    #     # for k in keys:
+    #     #     for ik in ignore_keys:
+    #     #         if k.startswith(ik):
+    #     #             print("Deleting key {} from state_dict.".format(k))
+    #     #             del sd[k]
+    #     # missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
+    #     #     sd, strict=False)
+    #     # print(f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
+    #     # if len(missing) > 0:
+    #     #     print(f"Missing Keys: {missing}")
+    #     # if len(unexpected) > 0:
+    #     #     print(f"Unexpected Keys: {unexpected}")
+    #     self.model.load_state_dict(sd['model'], strict=False)
+    #     if 'scale_factor' in sd['model']:
+    #         self.model.scale_factor = sd['model']['scale_factor']
+        
+    
 
     def get_first_stage_encoding(self, encoder_posterior):
         if isinstance(encoder_posterior, DiagonalGaussianDistribution):
@@ -659,6 +752,9 @@ class LatentDiffusion(DDPM):
 
     def training_step(self, batch):
         z, c, *_ = self.get_input(batch)
+
+        # print("Captured data in *_:", _)
+
         # print(_[0].shape)
         if self.scale_by_softsign:
             z = F.softsign(z)
@@ -721,20 +817,18 @@ class LatentDiffusion(DDPM):
             noise = 2 * torch.rand_like(x_start) - 1.
         else:
             raise NotImplementedError(f'{self.start_dist} is not supported !')
-        # K = -1. * torch.ones_like(x_start)target
+        # K = -1. * torch.ones_like(x_start)
         # C = noise - x_start  # t = 1000 / 1000
-        C = -1 * x_start  # U(t) = Ct, U(1) = -x0
+        C = -1 * x_start             # U(t) = Ct, U(1) = -x0
         # C = -2 * x_start               # U(t) = 1/2 * C * t**2, U(1) = 1/2 * C = -x0
         x_noisy = self.q_sample(x_start=x_start, noise=noise, t=t, C=C)  # (b, 2, c, h, w)
-        if self.cfg.model_name == 'cond_unet8':
-            C_pred, noise_pred, (e1, e2) = self.model(x_noisy, t, *args, **kwargs)
-        if self.cfg.model_name == 'cond_unet13':
-            C_pred, noise_pred, aux_C = self.model(x_noisy, t, *args, **kwargs)
-        else:
-            C_pred, noise_pred = self.model(x_noisy, t, *args, **kwargs)
+
+        """========================================================================"""
+        C_pred, noise_pred = self.model(x_noisy, t, *args, **kwargs)   #这个model应该对应UNET预测噪音
+        """========================================================================"""
         # C_pred = C_pred / torch.sqrt(t)
         # noise_pred = noise_pred / torch.sqrt(1 - t)
-        x_rec = self.pred_x0_from_xt(x_noisy, noise_pred, C_pred, t)  # x_rec:(B, C, H, W)
+        x_rec = self.pred_x0_from_xt(x_noisy, noise_pred, C_pred, t)       # x_rec:(B, 1, H, W)
         loss_dict = {}
         prefix = 'train'
 
@@ -749,62 +843,35 @@ class LatentDiffusion(DDPM):
 
         loss_simple = 0.
         loss_vlb = 0.
-
-        simple_weight1 = (t + 1) / t.sqrt()
-        simple_weight2 = (2 - t).sqrt() / (1 - t + self.eps).sqrt()
-
-        # if self.weighting_loss:
-        #     simple_weight1 = 2 * torch.exp(1 - t)
-        #     simple_weight2 = torch.exp(torch.sqrt(t))
-        #     if self.cfg.model_name == 'ncsnpp9':
-        #         simple_weight1 = (t + 1) / t.sqrt()
-        #         simple_weight2 = (2 - t).sqrt() / (1 - t + self.eps).sqrt()
-        # else:
-        #     simple_weight1 = 1
-        #     simple_weight2 = 1
+        # use l1 + l2
+        if self.weighting_loss:
+            simple_weight1 = 2*torch.exp(1-t)
+            simple_weight2 = torch.exp(torch.sqrt(t))
+            if self.cfg.model_name == 'ncsnpp9':
+                simple_weight1 = (t + 1) / t.sqrt()
+                simple_weight2 = (2 - t).sqrt() / (1 - t + self.eps).sqrt()
+        else:
+            simple_weight1 = 1
+            simple_weight2 = 1
 
         loss_simple += simple_weight1 * self.get_loss(C_pred, target1, mean=False).mean([1, 2, 3]) + \
                        simple_weight2 * self.get_loss(noise_pred, target2, mean=False).mean([1, 2, 3])
-
-        # loss_simple += self.Dice_Loss(C_pred, target1) * simple_weight1
-
         if self.use_l1:
             loss_simple += simple_weight1 * (C_pred - target1).abs().mean([1, 2, 3]) + \
                            simple_weight2 * (noise_pred - target2).abs().mean([1, 2, 3])
             loss_simple = loss_simple / 2
-
-        if self.cfg.model_name == 'cond_unet8':
-            loss_simple += 0.05*(self.Dice_Loss(e1, (kwargs['edge'] + 1)/2) + self.Dice_Loss(e2, (kwargs['edge'] + 1)/2))
-        elif self.cfg.model_name == 'cond_unet13':
-            loss_simple += 0.5 * (simple_weight1 * self.get_loss(aux_C, target1, mean=False).mean([1, 2, 3]) + \
-                                  simple_weight1 * (aux_C - target1).abs().mean([1, 2, 3]))
-
-        rec_weight = (1 - t.reshape(C.shape[0], 1)) ** 2
-        # rec_weight = 1 - t.reshape(C.shape[0], 1)  # (B, 1)
+        # rec_weight = (1 - t.reshape(C.shape[0], 1)) ** 2
+        rec_weight = 1 - t.reshape(C.shape[0], 1)           # (B, 1)
         loss_simple = loss_simple.mean()
         loss_dict.update({f'{prefix}/loss_simple': loss_simple})
 
-        loss_vlb += torch.abs(x_rec - target3).mean([1, 2, 3]) * rec_weight # : (B, 1)
-        # loss_vlb += self.Dice_Loss(x_rec, target3) * rec_weight
-
-        # loss_vlb = loss_vlb
-        loss_vlb = loss_vlb.mean()
-
-        if self.cfg.get('use_disloss', False):
-            with torch.no_grad():
-                edge_rec = self.first_stage_model.decode(x_rec / self.scale_factor)
-                edge_rec = unnormalize_to_zero_to_one(edge_rec)
-                edge_rec = torch.clamp(edge_rec, min=0., max=1.) # B, 1, 320, 320
-            loss_tmp = self.cross_entropy_loss_RCF(edge_rec, (kwargs['edge'] + 1)/2) * rec_weight  # B, 1
-            loss_ce = SpecifyGradient.apply(x_rec, loss_tmp.mean())
-            # print(loss_ce.shape)
-            # print(loss_vlb.shape)
-            loss_vlb += loss_ce.mean()
-
+        # loss_vlb += torch.abs(x_rec - target3).mean([1, 2, 3]) * rec_weight: (B, 1)
+        # loss_vlb += self.Dice_Loss(x_rec, target3)
+        # loss_vlb = loss_vlb.mean()
+        loss_vlb = 0
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
 
-        #loss = loss_simple + loss_vlb
-        loss = loss_simple
+        loss = loss_simple + loss_vlb
         loss_dict.update({f'{prefix}/loss': loss})
 
         return loss, loss_dict
@@ -878,7 +945,196 @@ class LatentDiffusion(DDPM):
         if aux_out is not None:
             return x_rec, aux_out
         return x_rec
+    
+    @torch.no_grad()
+    def sample_save_frames(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True, dir_index=None, sample_cfg=None):
+        if dir_index is None:
+            raise ValueError('dir_index should not be None')
+        # image_size, channels = self.image_size, self.channels
+        channels = self.channels
+        image_size = cond.shape[-2:]
+        if cond is not None:
+            batch_size = cond.shape[0]
+        down_ratio = self.first_stage_model.down_ratio
+        if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+            z, aux_out = self.sample_fn_save_frame((batch_size, channels, image_size[0] // down_ratio, image_size[1] // down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, dir_index=dir_index, sample_cfg=sample_cfg)
+        else:
+            z = self.sample_fn_save_frame((batch_size, channels, image_size[0]//down_ratio, image_size[1]//down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, dir_index=dir_index, sample_cfg=sample_cfg)
+            aux_out = None
 
+        if self.scale_by_std:
+            z = 1. / self.scale_factor * z.detach()
+            if self.cfg.model_name == 'cond_unet13':
+                aux_out = 1. / self.scale_factor * aux_out.detach()
+        elif self.scale_by_softsign:
+            z = z / (1 - z.abs())
+            z = z.detach()
+        #print(z.shape)
+        x_rec = self.first_stage_model.decode(z)
+        x_rec = unnormalize_to_zero_to_one(x_rec)
+        x_rec = torch.clamp(x_rec, min=0., max=1.)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = self.first_stage_model.decode(aux_out)
+            aux_out = unnormalize_to_zero_to_one(aux_out)
+            aux_out = torch.clamp(aux_out, min=0., max=1.)
+        if mask is not None:
+            x_rec = mask * unnormalize_to_zero_to_one(cond) + (1 - mask) * x_rec
+        if aux_out is not None:
+            return x_rec, aux_out
+        return x_rec
+    
+    @torch.no_grad()
+    def sample_cond(self, batch_size=16, up_scale=1, cond=None, cond2=None, mask=None, denoise=True, split_time=0.4):
+        # image_size, channels = self.image_size, self.channels
+        channels = self.channels
+        image_size = cond.shape[-2:]
+        if cond is not None:
+            batch_size = cond.shape[0]
+        down_ratio = self.first_stage_model.down_ratio
+        if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+            z, aux_out = self.sample_fn_by_split_cond((batch_size, channels, image_size[0] // down_ratio, image_size[1] // down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, cond2=cond2, denoise=denoise, split_time=split_time)
+        else:
+            z = self.sample_fn_by_split_cond((batch_size, channels, image_size[0]//down_ratio, image_size[1]//down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, cond2=cond2, denoise=denoise, split_time=split_time)
+            aux_out = None
+
+        if self.scale_by_std:
+            z = 1. / self.scale_factor * z.detach()
+            if self.cfg.model_name == 'cond_unet13':
+                aux_out = 1. / self.scale_factor * aux_out.detach()
+        elif self.scale_by_softsign:
+            z = z / (1 - z.abs())
+            z = z.detach()
+        #print(z.shape)
+        x_rec = self.first_stage_model.decode(z)
+        x_rec = unnormalize_to_zero_to_one(x_rec)
+        x_rec = torch.clamp(x_rec, min=0., max=1.)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = self.first_stage_model.decode(aux_out)
+            aux_out = unnormalize_to_zero_to_one(aux_out)
+            aux_out = torch.clamp(aux_out, min=0., max=1.)
+        if mask is not None:
+            x_rec = mask * unnormalize_to_zero_to_one(cond) + (1 - mask) * x_rec
+        if aux_out is not None:
+            return x_rec, aux_out
+        return x_rec
+    
+    @torch.no_grad()
+    def sample_cond_z_mean(self, batch_size=16, up_scale=1, cond=None, cond2=None, mask=None, denoise=True, split_time=0.4):
+        # image_size, channels = self.image_size, self.channels
+        channels = self.channels
+        image_size = cond.shape[-2:]
+        if cond is not None:
+            batch_size = cond.shape[0]
+        down_ratio = self.first_stage_model.down_ratio
+        if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+            z, aux_out = self.sample_fn_by_split_cond_z_mean((batch_size, channels, image_size[0] // down_ratio, image_size[1] // down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, cond2=cond2, denoise=denoise, split_time=split_time)
+        else:
+            z = self.sample_fn_by_split_cond_z_mean((batch_size, channels, image_size[0]//down_ratio, image_size[1]//down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, cond2=cond2, denoise=denoise, split_time=split_time)
+            aux_out = None
+
+        if self.scale_by_std:
+            z = 1. / self.scale_factor * z.detach()
+            if self.cfg.model_name == 'cond_unet13':
+                aux_out = 1. / self.scale_factor * aux_out.detach()
+        elif self.scale_by_softsign:
+            z = z / (1 - z.abs())
+            z = z.detach()
+        #print(z.shape)
+        x_rec = self.first_stage_model.decode(z)
+        x_rec = unnormalize_to_zero_to_one(x_rec)
+        x_rec = torch.clamp(x_rec, min=0., max=1.)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = self.first_stage_model.decode(aux_out)
+            aux_out = unnormalize_to_zero_to_one(aux_out)
+            aux_out = torch.clamp(aux_out, min=0., max=1.)
+        if mask is not None:
+            x_rec = mask * unnormalize_to_zero_to_one(cond) + (1 - mask) * x_rec
+        if aux_out is not None:
+            return x_rec, aux_out
+        return x_rec
+    
+    
+    @torch.no_grad()
+    def sample_same(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True, split_time=0.4):
+        # image_size, channels = self.image_size, self.channels
+        channels = self.channels
+        image_size = cond.shape[-2:]
+        if cond is not None:
+            batch_size = cond.shape[0]
+        down_ratio = self.first_stage_model.down_ratio
+        if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+            z, aux_out, split_dict = self.sample_fn_same((batch_size, channels, image_size[0] // down_ratio, image_size[1] // down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, split_time=split_time)
+        else:
+            z, split_dict = self.sample_fn_same((batch_size, channels, image_size[0]//down_ratio, image_size[1]//down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, split_time=split_time)
+            aux_out = None
+
+        if self.scale_by_std:
+            z = 1. / self.scale_factor * z.detach()
+            if self.cfg.model_name == 'cond_unet13':
+                aux_out = 1. / self.scale_factor * aux_out.detach()
+        elif self.scale_by_softsign:
+            z = z / (1 - z.abs())
+            z = z.detach()
+        #print(z.shape)
+        x_rec = self.first_stage_model.decode(z)
+        x_rec = unnormalize_to_zero_to_one(x_rec)
+        x_rec = torch.clamp(x_rec, min=0., max=1.)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = self.first_stage_model.decode(aux_out)
+            aux_out = unnormalize_to_zero_to_one(aux_out)
+            aux_out = torch.clamp(aux_out, min=0., max=1.)
+        if mask is not None:
+            x_rec = mask * unnormalize_to_zero_to_one(cond) + (1 - mask) * x_rec
+        if aux_out is not None:
+            return x_rec, aux_out, split_dict
+        return x_rec, split_dict
+    
+    
+    @torch.no_grad()
+    def sample_diff(self, batch_size=16, up_scale=1, cond=None, mask=None, denoise=True, split_dict=None):
+        # image_size, channels = self.image_size, self.channels
+        channels = self.channels
+        image_size = cond.shape[-2:]
+        if cond is not None:
+            batch_size = cond.shape[0]
+        down_ratio = self.first_stage_model.down_ratio
+        if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+            z, aux_out = self.sample_fn_diff((batch_size, channels, image_size[0] // down_ratio, image_size[1] // down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, split_dict=split_dict)
+        else:
+            z = self.sample_fn_diff((batch_size, channels, image_size[0]//down_ratio, image_size[1]//down_ratio),
+                               up_scale=up_scale, unnormalize=False, cond=cond, denoise=denoise, split_dict=split_dict)
+            aux_out = None
+
+        if self.scale_by_std:
+            z = 1. / self.scale_factor * z.detach()
+            if self.cfg.model_name == 'cond_unet13':
+                aux_out = 1. / self.scale_factor * aux_out.detach()
+        elif self.scale_by_softsign:
+            z = z / (1 - z.abs())
+            z = z.detach()
+        #print(z.shape)
+        x_rec = self.first_stage_model.decode(z)
+        x_rec = unnormalize_to_zero_to_one(x_rec)
+        x_rec = torch.clamp(x_rec, min=0., max=1.)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = self.first_stage_model.decode(aux_out) 
+            aux_out = unnormalize_to_zero_to_one(aux_out)
+            aux_out = torch.clamp(aux_out, min=0., max=1.)
+        if mask is not None:
+            x_rec = mask * unnormalize_to_zero_to_one(cond) + (1 - mask) * x_rec
+        if aux_out is not None:
+            return x_rec, aux_out
+        return x_rec
+    
     @torch.no_grad()
     def sample_fn(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
@@ -894,6 +1150,12 @@ class LatentDiffusion(DDPM):
         if denoise:
             eps = self.eps
             time_steps = torch.cat((time_steps[:-1], torch.tensor([step - eps]), torch.tensor([eps])), dim=0)
+
+        torch.manual_seed(0)
+        torch.random.manual_seed(0)
+        np.random.seed(0)
+        random.seed(0)
+
 
         if self.start_dist == 'normal':
             img = torch.randn(shape, device=device)
@@ -912,6 +1174,23 @@ class LatentDiffusion(DDPM):
                 s = cur_time
             if cond is not None:
                 pred = self.model(img, cur_time, cond)
+                # load img cur_time and cond from file to compare whether the model is correct or not
+                # save_dict = {'img': img.clone(), 'cur_time': cur_time.clone(), 'cond': cond.clone()}
+                # save_path = os.path.join("./", f"img_cur_time_cond_{i}.pt")
+                # # torch.save(save_dict, save_path)
+
+                # # compare img cur_time and cond from file
+                # load_dict = torch.load(save_path)
+                # load_img = load_dict['img']
+                # load_cur_time = load_dict['cur_time']
+                # load_cond = load_dict['cond']
+                # assert torch.allclose(load_img, img)
+                # assert torch.allclose(load_cur_time, cur_time)
+                # print(torch.where(load_cond != cond))
+                # print(torch.sum(load_cond != cond))
+                # print(torch.sum(torch.abs(load_cond - cond )))
+                # assert torch.allclose(load_cond, cond)
+       
             else:
                 pred = self.model(img, cur_time)
             # C, noise = pred.chunk(2, dim=1)
@@ -950,6 +1229,424 @@ class LatentDiffusion(DDPM):
         if aux_out is not None:
             return img, aux_out
         return img
+    
+    
+    @torch.no_grad()
+    def sample_fn_save_frame(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False, dir_index=None, sample_cfg=None):
+        if dir_index is None:
+            raise ValueError('dir_index should not be None')
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
+            self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+
+        # times = torch.linspace(-1, total_timesteps, steps=self.sampling_timesteps + 1).int()
+        # times = list(reversed(times.int().tolist()))
+        # time_pairs = list(zip(times[:-1], times[1:]))
+        # time_steps = torch.tensor([0.25, 0.15, 0.1, 0.1, 0.1, 0.09, 0.075, 0.06, 0.045, 0.03])
+        step = 1. / self.sampling_timesteps
+        # time_steps = torch.tensor([0.1]).repeat(10)
+        time_steps = torch.tensor([step]).repeat(self.sampling_timesteps)
+        if denoise:
+            eps = self.eps
+            time_steps = torch.cat((time_steps[:-1], torch.tensor([step - eps]), torch.tensor([eps])), dim=0)
+
+        if self.start_dist == 'normal':
+            img = torch.randn(shape, device=device)
+        elif self.start_dist == 'uniform':
+            img = 2 * torch.rand(shape, device=device) - 1.
+        else:
+            raise NotImplementedError(f'{self.start_dist} is not supported !')
+        img = F.interpolate(img, scale_factor=up_scale, mode='bilinear', align_corners=True)
+        img_aux = F.interpolate(img.clone(), scale_factor=up_scale, mode='bilinear', align_corners=True)
+        # img_aux = img.clone()
+        # K = -1 * torch.ones_like(img)
+        cur_time = torch.ones((batch,), device=device)
+        
+        saved_frame_dir = sample_cfg.saved_frame_dir + f"{dir_index}"
+        saved_frame_folder = os.path.join(sample_cfg.saved_frame_root, saved_frame_dir)
+        if not os.path.exists(saved_frame_folder):
+            os.makedirs(saved_frame_folder)
+        print(f"Saving frames to {saved_frame_folder}")
+        
+        for i, time_step in enumerate(time_steps):
+            # for every i, save the img tensor as png file to 
+            # self.cfg.sampler.saved_frame_root / self.cfg.sampler.saved_frame_dir / {self.cfg.sampler.saved_frame_dir}_{self.cfg.sampler.frame_type}_str(i).png
+            
+            
+            s = torch.full((batch,), time_step, device=device)
+            if i == time_steps.shape[0] - 1:
+                s = cur_time
+            if cond is not None:
+                pred = self.model(img, cur_time, cond)
+            else:
+                pred = self.model(img, cur_time)
+            # C, noise = pred.chunk(2, dim=1)
+            C, noise = pred[:2]
+            if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+                aux_out = pred[-1]
+            else:
+                aux_out = None
+            # if self.scale_by_softsign:
+            #     # correct the C for softsign
+            #     x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            #     x0 = torch.clamp(x0, min=-0.987654321, max=0.987654321)
+            #     C = -x0
+            # correct C
+            x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            C = -1 * x0
+            img = self.pred_xtms_from_xt(img, noise, C, cur_time, s)
+            # if self.cfg.model_name == 'cond_unet13' and i == len(time_steps) - 2:
+            #     img_aux = img
+            # if self.cfg.model_name == 'cond_unet13' and i in [len(time_steps)-2, len(time_steps)-1]:
+            #     x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+            #     C_aux = -1 * x0_aux
+            #     img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            if self.cfg.model_name == 'cond_unet13':
+                for _ in range(1):
+                    x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+                    C_aux = -1 * x0_aux
+                    img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            cur_time = cur_time - s
+            
+            # save the img tensor as png file to saved_frame_folder
+            img_name = f"{saved_frame_dir}_{sample_cfg.saved_frame_type}_{self.sampling_timesteps-i}.png"
+            img_path = os.path.join(saved_frame_folder, img_name)
+            
+            torchvision.utils.save_image(img, img_path)
+            
+        if self.scale_by_softsign:
+            img.clamp_(-0.987654321, 0.987654321)
+            print("softsign")
+        if unnormalize:
+            print("unnormalize")
+            img = unnormalize_to_zero_to_one(img)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = img_aux
+        if aux_out is not None:
+            return img, aux_out
+        return img
+    
+    @torch.no_grad()
+    def sample_fn_by_split_cond(self, shape, up_scale=1, unnormalize=True, cond=None, cond2=None, denoise=False, split_time=0.4):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
+            self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+
+        # times = torch.linspace(-1, total_timesteps, steps=self.sampling_timesteps + 1).int()
+        # times = list(reversed(times.int().tolist()))
+        # time_pairs = list(zip(times[:-1], times[1:]))
+        # time_steps = torch.tensor([0.25, 0.15, 0.1, 0.1, 0.1, 0.09, 0.075, 0.06, 0.045, 0.03])
+        step = 1. / self.sampling_timesteps
+        # time_steps = torch.tensor([0.1]).repeat(10)
+        time_steps = torch.tensor([step]).repeat(self.sampling_timesteps)
+        if denoise:
+            eps = self.eps
+            time_steps = torch.cat((time_steps[:-1], torch.tensor([step - eps]), torch.tensor([eps])), dim=0)
+
+        if self.start_dist == 'normal':
+            img = torch.randn(shape, device=device)
+        elif self.start_dist == 'uniform':
+            img = 2 * torch.rand(shape, device=device) - 1.
+        else:
+            raise NotImplementedError(f'{self.start_dist} is not supported !')
+        img = F.interpolate(img, scale_factor=up_scale, mode='bilinear', align_corners=True)
+        img_aux = F.interpolate(img.clone(), scale_factor=up_scale, mode='bilinear', align_corners=True)
+        # img_aux = img.clone()
+        # K = -1 * torch.ones_like(img)
+        cur_time = torch.ones((batch,), device=device)
+        for i, time_step in enumerate(time_steps):
+            s = torch.full((batch,), time_step, device=device)
+            if i == time_steps.shape[0] - 1:
+                s = cur_time
+            if cond is not None and cond2 is not None:
+                if cur_time > split_time:
+                    pred = self.model(img, cur_time, cond)
+                else:
+                    pred = self.model(img, cur_time, cond2)
+            else:
+                pred = self.model(img, cur_time)
+            # C, noise = pred.chunk(2, dim=1)
+            C, noise = pred[:2]
+            if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+                aux_out = pred[-1]
+            else:
+                aux_out = None
+            # if self.scale_by_softsign:
+            #     # correct the C for softsign
+            #     x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            #     x0 = torch.clamp(x0, min=-0.987654321, max=0.987654321)
+            #     C = -x0
+            # correct C
+            x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            C = -1 * x0
+            img = self.pred_xtms_from_xt(img, noise, C, cur_time, s)
+            # if self.cfg.model_name == 'cond_unet13' and i == len(time_steps) - 2:
+            #     img_aux = img
+            # if self.cfg.model_name == 'cond_unet13' and i in [len(time_steps)-2, len(time_steps)-1]:
+            #     x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+            #     C_aux = -1 * x0_aux
+            #     img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            if self.cfg.model_name == 'cond_unet13':
+                for _ in range(1):
+                    x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+                    C_aux = -1 * x0_aux
+                    img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            cur_time = cur_time - s
+        if self.scale_by_softsign:
+            img.clamp_(-0.987654321, 0.987654321)
+        if unnormalize:
+            img = unnormalize_to_zero_to_one(img)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = img_aux
+        if aux_out is not None:
+            return img, aux_out
+        return img
+    
+    @torch.no_grad()
+    def sample_fn_by_split_cond_z_mean(self, shape, up_scale=1, unnormalize=True, cond=None, cond2=None, denoise=False, split_time=0.4):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
+            self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+
+        # times = torch.linspace(-1, total_timesteps, steps=self.sampling_timesteps + 1).int()
+        # times = list(reversed(times.int().tolist()))
+        # time_pairs = list(zip(times[:-1], times[1:]))
+        # time_steps = torch.tensor([0.25, 0.15, 0.1, 0.1, 0.1, 0.09, 0.075, 0.06, 0.045, 0.03])
+        step = 1. / self.sampling_timesteps
+        # time_steps = torch.tensor([0.1]).repeat(10)
+        time_steps = torch.tensor([step]).repeat(self.sampling_timesteps)
+        if denoise:
+            eps = self.eps
+            time_steps = torch.cat((time_steps[:-1], torch.tensor([step - eps]), torch.tensor([eps])), dim=0)
+
+        if self.start_dist == 'normal':
+            img = torch.randn(shape, device=device)
+        elif self.start_dist == 'uniform':
+            img = 2 * torch.rand(shape, device=device) - 1.
+        else:
+            raise NotImplementedError(f'{self.start_dist} is not supported !')
+        img = F.interpolate(img, scale_factor=up_scale, mode='bilinear', align_corners=True)
+        img_aux = F.interpolate(img.clone(), scale_factor=up_scale, mode='bilinear', align_corners=True)
+        # img_aux = img.clone()
+        # K = -1 * torch.ones_like(img)
+        cur_time = torch.ones((batch,), device=device)
+        split_point = False
+        for i, time_step in enumerate(time_steps):
+            s = torch.full((batch,), time_step, device=device)
+            if i == time_steps.shape[0] - 1:
+                s = cur_time
+            if cond is not None and cond2 is not None:
+                if cur_time[0] > split_time:
+                    pred = self.model(img, cur_time, cond)
+                else:
+                    if not split_point:
+                        split_point = True
+                        img = img.mean(dim=0, keepdim=True).repeat(batch, 1, 1, 1) # [bs,1,256,256]
+                    pred = self.model(img, cur_time, cond2)
+            else:
+                pred = self.model(img, cur_time)
+            # C, noise = pred.chunk(2, dim=1)
+            C, noise = pred[:2]
+            if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+                aux_out = pred[-1]
+            else:
+                aux_out = None
+            # if self.scale_by_softsign:
+            #     # correct the C for softsign
+            #     x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            #     x0 = torch.clamp(x0, min=-0.987654321, max=0.987654321)
+            #     C = -x0
+            # correct C
+            x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            C = -1 * x0
+            img = self.pred_xtms_from_xt(img, noise, C, cur_time, s)
+            # if self.cfg.model_name == 'cond_unet13' and i == len(time_steps) - 2:
+            #     img_aux = img
+            # if self.cfg.model_name == 'cond_unet13' and i in [len(time_steps)-2, len(time_steps)-1]:
+            #     x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+            #     C_aux = -1 * x0_aux
+            #     img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            if self.cfg.model_name == 'cond_unet13':
+                for _ in range(1):
+                    x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+                    C_aux = -1 * x0_aux
+                    img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            cur_time = cur_time - s
+        if self.scale_by_softsign:
+            img.clamp_(-0.987654321, 0.987654321)
+        if unnormalize:
+            img = unnormalize_to_zero_to_one(img)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = img_aux
+        if aux_out is not None:
+            return img, aux_out
+        return img
+    
+    
+    @torch.no_grad()
+    def sample_fn_same(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False, split_time=0.4):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
+            self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+
+        # times = torch.linspace(-1, total_timesteps, steps=self.sampling_timesteps + 1).int()
+        # times = list(reversed(times.int().tolist()))
+        # time_pairs = list(zip(times[:-1], times[1:]))
+        # time_steps = torch.tensor([0.25, 0.15, 0.1, 0.1, 0.1, 0.09, 0.075, 0.06, 0.045, 0.03])
+        step = 1. / self.sampling_timesteps
+        # time_steps = torch.tensor([0.1]).repeat(10)
+        time_steps = torch.tensor([step]).repeat(self.sampling_timesteps)
+        if denoise:
+            eps = self.eps
+            time_steps = torch.cat((time_steps[:-1], torch.tensor([step - eps]), torch.tensor([eps])), dim=0)
+
+        
+        torch.manual_seed(0)
+        torch.random.manual_seed(0)
+        np.random.seed(0)
+        random.seed(0)
+
+        if self.start_dist == 'normal':
+            img = torch.randn(shape, device=device)
+        elif self.start_dist == 'uniform':
+            img = 2 * torch.rand(shape, device=device) - 1.
+        else:
+            raise NotImplementedError(f'{self.start_dist} is not supported !')
+        img = F.interpolate(img, scale_factor=up_scale, mode='bilinear', align_corners=True)
+        img_aux = F.interpolate(img.clone(), scale_factor=up_scale, mode='bilinear', align_corners=True)
+        # img_aux = img.clone()
+        # K = -1 * torch.ones_like(img)
+        cur_time = torch.ones((batch,), device=device)
+        split_dict = {}
+        for i, time_step in enumerate(time_steps):
+            s = torch.full((batch,), time_step, device=device)
+            if i == time_steps.shape[0] - 1:
+                s = cur_time
+            if cond is not None:
+                pred = self.model(img, cur_time, cond)
+                # save img cur_time cond to file .pt
+                # save_dict = {'img': img.clone(), 'cur_time': cur_time.clone(), 'cond': cond.clone()}
+                # save_path = os.path.join("./", f"img_cur_time_cond_{i}.pt")
+                # torch.save(save_dict, save_path)
+            else:
+                pred = self.model(img, cur_time)
+            # C, noise = pred.chunk(2, dim=1)
+            C, noise = pred[:2]
+            if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+                aux_out = pred[-1]
+            else:
+                aux_out = None
+            # if self.scale_by_softsign:
+            #     # correct the C for softsign
+            #     x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            #     x0 = torch.clamp(x0, min=-0.987654321, max=0.987654321)
+            #     C = -x0
+            # correct C
+            x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            C = -1 * x0
+            img = self.pred_xtms_from_xt(img, noise, C, cur_time, s)
+            # if self.cfg.model_name == 'cond_unet13' and i == len(time_steps) - 2:
+            #     img_aux = img
+            # if self.cfg.model_name == 'cond_unet13' and i in [len(time_steps)-2, len(time_steps)-1]:
+            #     x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+            #     C_aux = -1 * x0_aux
+            #     img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            if self.cfg.model_name == 'cond_unet13':
+                for _ in range(1):
+                    x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+                    C_aux = -1 * x0_aux
+                    img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            if cur_time[0] > split_time and cur_time[0] - s[0] <= split_time:
+                    split_dict['split_idx'] = i + 1
+                    split_dict['split_cur_time'] = cur_time[0] - s[0]
+                    split_dict['split_img'] = img.clone()
+                    
+            cur_time = cur_time - s
+        if self.scale_by_softsign:
+            img.clamp_(-0.987654321, 0.987654321)
+        if unnormalize:
+            img = unnormalize_to_zero_to_one(img)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = img_aux
+        if aux_out is not None:
+            return img, aux_out, split_dict
+        assert split_dict is not None, "split_dict is None"
+        return img, split_dict
+    
+    
+    @torch.no_grad()
+    def sample_fn_diff(self, shape, up_scale=1, unnormalize=True, cond=None, denoise=False, split_dict=None):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], \
+            self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+
+        # times = torch.linspace(-1, total_timesteps, steps=self.sampling_timesteps + 1).int()
+        # times = list(reversed(times.int().tolist()))
+        # time_pairs = list(zip(times[:-1], times[1:]))
+        # time_steps = torch.tensor([0.25, 0.15, 0.1, 0.1, 0.1, 0.09, 0.075, 0.06, 0.045, 0.03])
+        split_idx = split_dict['split_idx']
+        step = 1. / self.sampling_timesteps
+        # time_steps = torch.tensor([0.1]).repeat(10)
+        time_steps = torch.tensor([step]).repeat(self.sampling_timesteps)
+        if denoise:
+            eps = self.eps
+            time_steps = torch.cat((time_steps[:-1], torch.tensor([step - eps]), torch.tensor([eps])), dim=0)
+
+        if self.start_dist == 'normal':
+            img = torch.randn(shape, device=device)
+        elif self.start_dist == 'uniform':
+            img = 2 * torch.rand(shape, device=device) - 1.
+        else:
+            raise NotImplementedError(f'{self.start_dist} is not supported !')
+        # img = F.interpolate(img, scale_factor=up_scale, mode='bilinear', align_corners=True)
+        img = split_dict['split_img']
+        img_aux = F.interpolate(img.clone(), scale_factor=up_scale, mode='bilinear', align_corners=True)
+        # img_aux = img.clone()
+        # K = -1 * torch.ones_like(img)
+        cur_time = torch.ones((batch,), device=device) * split_dict['split_cur_time']
+        time_steps = time_steps[split_idx:]
+        for i, time_step in enumerate(time_steps):
+            s = torch.full((batch,), time_step, device=device)
+            if i == time_steps.shape[0] - 1:
+                s = cur_time
+            if cond is not None:
+                pred = self.model(img, cur_time, cond)
+            else:
+                pred = self.model(img, cur_time)
+            # C, noise = pred.chunk(2, dim=1)
+            C, noise = pred[:2]
+            if self.cfg.model_name == 'cond_unet8' or self.cfg.model_name == 'cond_unet13':
+                aux_out = pred[-1]
+            else:
+                aux_out = None
+            # if self.scale_by_softsign:
+            #     # correct the C for softsign
+            #     x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            #     x0 = torch.clamp(x0, min=-0.987654321, max=0.987654321)
+            #     C = -x0
+            # correct C
+            x0 = self.pred_x0_from_xt(img, noise, C, cur_time)
+            C = -1 * x0
+            img = self.pred_xtms_from_xt(img, noise, C, cur_time, s)
+            # if self.cfg.model_name == 'cond_unet13' and i == len(time_steps) - 2:
+            #     img_aux = img
+            # if self.cfg.model_name == 'cond_unet13' and i in [len(time_steps)-2, len(time_steps)-1]:
+            #     x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+            #     C_aux = -1 * x0_aux
+            #     img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            if self.cfg.model_name == 'cond_unet13':
+                for _ in range(1):
+                    x0_aux = self.pred_x0_from_xt(img_aux, noise, aux_out, cur_time)
+                    C_aux = -1 * x0_aux
+                    img_aux = self.pred_xtms_from_xt(img_aux, noise, C_aux, cur_time, s)
+            # if cur_time[0] > split_time and cur_time[0] - s[0] <= split_time:
+            #         split_img = img.clone()
+            cur_time = cur_time - s
+        if self.scale_by_softsign:
+            img.clamp_(-0.987654321, 0.987654321)
+        if unnormalize:
+            img = unnormalize_to_zero_to_one(img)
+        if self.cfg.model_name == 'cond_unet13':
+            aux_out = img_aux
+        if aux_out is not None:
+            return img, aux_out
+        return img
+
 
 class SpecifyGradient(torch.autograd.Function):
     @staticmethod

@@ -149,11 +149,11 @@ def shifted_window_attention(
         attn = attn.view(-1, num_heads, x.size(1), x.size(1))
 
     attn = F.softmax(attn, dim=-1)
-    attn = F.dropout(attn, p=attention_dropout)
+    # attn = F.dropout(attn, p=attention_dropout)
 
     x = attn.matmul(v).transpose(1, 2).reshape(x.size(0), x.size(1), C)
     x = F.linear(x, proj_weight, proj_bias)
-    x = F.dropout(x, p=dropout)
+    # x = F.dropout(x, p=dropout)
 
     # reverse windows
     x = x.view(B, pad_H // window_size[0], pad_W // window_size[1], window_size[0], window_size[1], C)
@@ -197,6 +197,7 @@ class ShiftedWindowAttention(nn.Module):
         self.dropout = dropout
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        #print(self.qkv.weight.shape, self.qkv.bias.shape)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
 
         # define a parameter table of relative position bias
@@ -232,7 +233,7 @@ class ShiftedWindowAttention(nn.Module):
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index]  # type: ignore[index]
         relative_position_bias = relative_position_bias.view(N, N, -1)
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
-
+        #print(self.qkv.weight.shape, self.proj.weight.shape)
         return shifted_window_attention(
             x,
             self.qkv.weight,
