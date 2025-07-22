@@ -2,6 +2,7 @@
 
 This is the code for the paper "RadioDiff: An Effective Generative Diffusion Model for Sampling-Free Dynamic Radio Map Construction", IEEE TCCN.
 
+Weight: Please contact me at xcwang_1@stu.xidian.edu.cn
 [Paper](https://ieeexplore.ieee.org/document/10764739)
 
 #### 🔥🔥🔥 News
