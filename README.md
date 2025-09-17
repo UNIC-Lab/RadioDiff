@@ -3,15 +3,15 @@
 ---
 ### Welcome to the RadioDiff family
 
-RadioDiff: Base BackBone: [RadioDiff](https://ieeexplore.ieee.org/document/10764739) [GitHub](https://github.com/UNIC-Lab/RadioDiff)
+Base BackBone, Paper Link: [RadioDiff](https://ieeexplore.ieee.org/document/10764739) Code Link: [GitHub](https://github.com/UNIC-Lab/RadioDiff)
 
-RadioDiff-k^2: PINN Enhanced with Helmholtz Equation: [RadioDiff-$k^2$](https://arxiv.org/pdf/2504.15623)
+PINN Enhanced with Helmholtz Equation, Paper Link: [RadioDiff-$k^2$](https://arxiv.org/pdf/2504.15623)
 
-iRadioDiff: Indoor RM Construction with Physical Information [GitHub](https://github.com/UNIC-Lab/iRadioDiff)
+Indoor RM Construction with Physical Information, Code Link: [GitHub](https://github.com/UNIC-Lab/iRadioDiff)
 
-RadioDiff-3D: 3D RM with DataSet: [RadioDiff-3D](https://ieeexplore.ieee.org/document/11083758) [GitHub](https://github.com/UNIC-Lab/UrbanRadio3D)
+3D RM with DataSet, Paper Link: [RadioDiff-3D](https://ieeexplore.ieee.org/document/11083758) Code Link: [GitHub](https://github.com/UNIC-Lab/UrbanRadio3D)
 
-RadioDiff-Inverse: Sparse Measurement for RM ISAC [RadioDiff-Inverse](https://arxiv.org/abs/2504.14298)
+Sparse Measurement for RM ISAC, Paper Link: [RadioDiff-Inverse](https://arxiv.org/abs/2504.14298)
 
 ---
 
