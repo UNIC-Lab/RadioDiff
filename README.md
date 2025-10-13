@@ -13,6 +13,8 @@ Indoor RM Construction with Physical Information, Code Link: [GitHub](https://gi
 
 Sparse Measurement for RM ISAC, Paper Link: [RadioDiff-Inverse](https://arxiv.org/abs/2504.14298)
 
+For more RM information, please visit the repo of [Awesome-Radio-Map-Categorized](https://github.com/UNIC-Lab/Awesome-Radio-Map-Categorized)
+
 ---
 
 This is the code for the paper "RadioDiff: An Effective Generative Diffusion Model for Sampling-Free Dynamic Radio Map Construction", IEEE TCCN.
