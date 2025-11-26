@@ -9,7 +9,7 @@ PINN Enhanced with Helmholtz Equation, Paper Link: [RadioDiff-$k^2$](https://arx
 
 Efficiency Enhanced RadioDiff, Paper Link: [RadioDiff-Turbo](https://ieeexplore.ieee.org/abstract/document/11152929/)
 
-Indoor RM Construction with Physical Information, Code Link: [GitHub](https://github.com/UNIC-Lab/iRadioDiff)
+Indoor RM Construction with Physical Information, Paper Link: [iRadioDiff](https://arxiv.org/abs/2511.20015), Code Link: [GitHub](https://github.com/UNIC-Lab/iRadioDiff)
 
 3D RM with DataSet, Paper Link: [RadioDiff-3D](https://ieeexplore.ieee.org/document/11083758), Code Link: [GitHub](https://github.com/UNIC-Lab/UrbanRadio3D)
 
