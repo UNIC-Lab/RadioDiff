@@ -9,6 +9,10 @@ PINN Enhanced with Helmholtz Equation, Paper Link: [RadioDiff-$k^2$](https://iee
 
 Efficiency Enhanced RadioDiff, Paper Link: [RadioDiff-Turbo](https://ieeexplore.ieee.org/abstract/document/11152929/)
 
+Dynamic Environment or BS Location Change, Paper Link: [RadioDiff-Flux](https://ieeexplore.ieee.org/document/11282987/)
+
+Few-Shot Learning, Paper Link: [RadioDiff-FS](https://arxiv.org/abs/2603.18865), Code Link: [GitHub](https://github.com/UNIC-Lab/RadioDiff-FS/blob/main/README.md)
+
 Indoor RM Construction with Physical Information, Paper Link: [iRadioDiff](https://arxiv.org/abs/2511.20015), Code Link: [GitHub](https://github.com/UNIC-Lab/iRadioDiff)
 
 3D RM with DataSet, Paper Link: [RadioDiff-3D](https://ieeexplore.ieee.org/document/11083758), Code Link: [GitHub](https://github.com/UNIC-Lab/UrbanRadio3D)
