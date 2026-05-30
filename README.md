@@ -1,27 +1,61 @@
 # RadioDiff: An Effective Generative Diffusion Model for Sampling-Free Dynamic Radio Map Construction
 
 ---
-### Welcome to the RadioDiff family
+## 📡 Welcome to the RadioDiff Family
 
-Base BackBone, Paper Link: [RadioDiff](https://ieeexplore.ieee.org/document/10764739), Code Link: [GitHub](https://github.com/UNIC-Lab/RadioDiff), **IEEE TCCN**, 2025
+> Radio map construction via generative diffusion models — UNIC Lab, Xidian University
 
-PINN Enhanced with Helmholtz Equation, Paper Link: [RadioDiff-$k^2$](https://ieeexplore.ieee.org/document/11278649), Code Link: [GitHub](https://github.com/UNIC-Lab/RadioDiff-k), **IEEE JSAC**, 2026
+---
 
-Efficiency Enhanced RadioDiff, Paper Link: [RadioDiff-Turbo](https://ieeexplore.ieee.org/abstract/document/11152929/), **IEEE INFOCOM wksp**, 2025
+### 🔷 Base Backbone
 
-Dynamic Environment or BS Location Change, Paper Link: [RadioDiff-Flux](https://ieeexplore.ieee.org/document/11282987/), **IEEE TCCN**, 2026
+**RadioDiff** — *The foundational diffusion model for radio map construction.*
+&nbsp;&nbsp;📄 [Paper](https://ieeexplore.ieee.org/document/10764739) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/RadioDiff) &nbsp;|&nbsp; ![IEEE TCCN](https://img.shields.io/badge/IEEE-TCCN%202025-blue)
 
-Few-Shot Learning, Paper Link: [RadioDiff-FS](https://arxiv.org/abs/2603.18865), Code Link: [GitHub](https://github.com/UNIC-Lab/RadioDiff-FS/blob/main/README.md)
+---
 
-Indoor RM Construction with Physical Information, Paper Link: [iRadioDiff](https://arxiv.org/abs/2511.20015), Code Link: [GitHub](https://github.com/UNIC-Lab/iRadioDiff), **IEEE ICC**, 2026
+### 🔬 Physics-Informed Extensions
 
-3D RM with DataSet, Paper Link: [RadioDiff-3D](https://ieeexplore.ieee.org/document/11083758), Code Link: [GitHub](https://github.com/UNIC-Lab/UrbanRadio3D), **IEEE TNSE**, 2025
+**RadioDiff-k²** — *PINN-enhanced diffusion guided by the Helmholtz equation.*
+&nbsp;&nbsp;📄 [Paper](https://ieeexplore.ieee.org/document/11278649) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/RadioDiff-k) &nbsp;|&nbsp; ![IEEE JSAC](https://img.shields.io/badge/IEEE-JSAC%202026-blue)
 
-Sparse Measurement for RM ISAC, Paper Link: [RadioDiff-Inverse](https://arxiv.org/abs/2504.14298), **IEEE TWC**, 2026
+**iRadioDiff** — *Indoor radio map construction with physical information integration.*
+&nbsp;&nbsp;📄 [Paper](https://arxiv.org/abs/2511.20015) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/iRadioDiff) &nbsp;|&nbsp; ![IEEE ICC](https://img.shields.io/badge/IEEE-ICC%202026-blue) &nbsp;![Best Paper](https://img.shields.io/badge/🏆-Best%20Paper%20Award-orange)
 
-Sparse Measurement for NLoS Localization, Paper Link: [RadioDiff-Loc](https://www.arxiv.org/abs/2509.01875)
+---
 
-For more RM information, please visit the repo of [Awesome-Radio-Map-Categorized](https://github.com/UNIC-Lab/Awesome-Radio-Map-Categorized)
+### ⚡ Efficiency & Dynamics
+
+**RadioDiff-Turbo** — *Efficiency-enhanced RadioDiff for accelerated inference.*
+&nbsp;&nbsp;📄 [Paper](https://ieeexplore.ieee.org/abstract/document/11152929/) &nbsp;|&nbsp; ![INFOCOM Workshop](https://img.shields.io/badge/IEEE-INFOCOM%20Wksp%202025-lightgrey)
+
+**RadioDiff-Flux** — *Adaptive reconstruction under dynamic environments and base station location changes.*
+&nbsp;&nbsp;📄 [Paper](https://ieeexplore.ieee.org/document/11282987/) &nbsp;|&nbsp; ![IEEE TCCN](https://img.shields.io/badge/IEEE-TCCN%202026-blue)
+
+---
+
+### 🌐 Extended Scenarios
+
+**RadioDiff-3D** — *3D radio map construction with the UrbanRadio3D dataset.*
+&nbsp;&nbsp;📄 [Paper](https://ieeexplore.ieee.org/document/11083758) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/UrbanRadio3D) &nbsp;|&nbsp; ![IEEE TNSE](https://img.shields.io/badge/IEEE-TNSE%202025-blue)
+
+**RadioDiff-FS** — *Few-shot learning for radio map construction with limited measurements.*
+&nbsp;&nbsp;📄 [Paper](https://arxiv.org/abs/2603.18865) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/RadioDiff-FS) &nbsp;|&nbsp; ![arXiv](https://img.shields.io/badge/arXiv-preprint-lightgrey)
+
+---
+
+### 📶 Sparse Measurement & Localization
+
+**RadioDiff-Inverse** — *Sparse measurement-based radio map recovery for ISAC applications.*
+&nbsp;&nbsp;📄 [Paper](https://arxiv.org/abs/2504.14298) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/radiodiff-inverse) &nbsp;|&nbsp; ![IEEE TWC](https://img.shields.io/badge/IEEE-TWC%202026-blue)
+
+**RadioDiff-Loc** — *Sparse measurement-based NLoS localization using diffusion models.*
+&nbsp;&nbsp;📄 [Paper](https://www.arxiv.org/abs/2509.01875) &nbsp;|&nbsp; ![arXiv](https://img.shields.io/badge/arXiv-preprint-lightgrey)
+
+---
+
+> 📚 For a comprehensive categorized overview of radio map research, visit [**Awesome-Radio-Map-Categorized**](https://github.com/UNIC-Lab/Awesome-Radio-Map-Categorized).
+
 
 ---
 
