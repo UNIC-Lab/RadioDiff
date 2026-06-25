@@ -40,7 +40,7 @@
 &nbsp;&nbsp;📄 [Paper](https://ieeexplore.ieee.org/document/11083758) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/UrbanRadio3D) &nbsp;|&nbsp; ![IEEE TNSE](https://img.shields.io/badge/IEEE-TNSE%202025-blue)
 
 **RadioDiff-FS** — *Few-shot learning for radio map construction with limited measurements.*
-&nbsp;&nbsp;📄 [Paper](https://arxiv.org/abs/2603.18865) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/RadioDiff-FS) &nbsp;|&nbsp; ![arXiv](https://img.shields.io/badge/arXiv-preprint-lightgrey)
+&nbsp;&nbsp;📄 [Paper](https://ieeexplore.ieee.org/document/11577136) &nbsp;|&nbsp; 💻 [Code](https://github.com/UNIC-Lab/RadioDiff-FS) &nbsp;|&nbsp; ![IEEE IoTJ](https://img.shields.io/badge/IEEE-IoTJ%202025-blue)
 
 ---
 
